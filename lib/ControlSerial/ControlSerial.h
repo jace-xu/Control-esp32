@@ -93,4 +93,33 @@ class ControlSerial{
             Serial2.write(speed_command, 8);
             delay(this->delay_time);
         }
+
+        /**
+         * @brief Function for setting absolute position (RESERVED - implementation pending)
+         * @param address The address of the motor
+         * @param position Target position in degrees or encoder counts
+         * @note Protocol command 0xFD for position mode
+         * @note [ ! ] This is a RESERVED interface - protocol implementation to be filled by user
+         * @note [ ! ] Motor must support position mode and have appropriate settings configured
+         */
+        void set_position(int address, float position){
+            // RESERVED: User to implement position control protocol (command 0xFD)
+            // Typical protocol structure for reference:
+            // uint8_t position_command[] = {
+            //     static_cast<uint8_t>(address),
+            //     0xFD,  // Position control command
+            //     direction,
+            //     position_high_byte,
+            //     position_low_byte,
+            //     speed_high_byte,
+            //     speed_low_byte,
+            //     0x6B
+            // };
+            // Serial2.write(position_command, 8);
+            // delay(this->delay_time);
+
+            (void)address;
+            (void)position;
+            // Placeholder: does nothing until user implements the protocol
+        }
 };
