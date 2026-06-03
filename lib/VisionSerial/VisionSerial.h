@@ -55,7 +55,13 @@ public:
      * @note Call this frequently in main loop
      */
     VisionError read() {
-        // Read available bytes
+        // Drain the ENTIRE RX buffer every call, keeping only the freshest
+        // valid packet. Returning on the first packet would leave the rest of
+        // the buffer backlogged: on ESP32 the consumer (~50Hz) cannot outrun a
+        // ~50Hz producer one-packet-at-a-time, so stale data would accumulate
+        // and the visual servo would track a target hundreds of ms old.
+        bool gotNewPacket = false;
+
         while (serial->available() > 0) {
             uint8_t byte = serial->read();
 
@@ -81,11 +87,17 @@ public:
                 bufferIndex = 0;
 
                 if (error.valid) {
+                    // Overwrite with the latest valid frame, but keep draining
+                    // the buffer so the next call starts empty.
                     lastError = error;
                     lastError.timestampMs = millis();
-                    return lastError;
+                    gotNewPacket = true;
                 }
             }
+        }
+
+        if (gotNewPacket) {
+            return lastError;
         }
 
         // Check if last data is too old
