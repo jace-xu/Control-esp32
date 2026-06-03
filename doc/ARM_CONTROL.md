@@ -53,7 +53,6 @@
 - 数据超时阈值 500ms: 超过未收到新帧则 `valid` 置为 false
 
  `VisionSerial::read()` 每次调用会**排空整个 RX 缓冲, 只保留最新一帧**。
-这避免了"每次只消费一包"导致的积压: 在 50Hz 消费 / 50Hz 生产下, 一次只取一包会让旧数据
 
 
 ## 4. ArmSequence: 任务编排核心
@@ -64,7 +63,7 @@
 g_arm_sequence->update(input.armServoTrigger);  // 参数 = A 键是否按住
 ```
 
-### 4.1 按住 A 键时
+### 4.1 按下a键
 
 每帧并行执行两件事:
 

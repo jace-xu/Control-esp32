@@ -101,11 +101,15 @@ void applyChassisCommand(const InputState& input) {
 // 机械臂控制
 // ============================================================================
 
-/// @brief 将 A 键状态转发给机械臂任务编排器
+/// @brief 将 A/X/B 三键状态转发给机械臂任务编排器
 /// @param input 手柄输入状态
-/// @note 视觉伺服 + 上下电机自动序列的全部逻辑封装在 ArmSequence 中
+/// @note  两阶段 + 颜色队列模式:
+///        - A 键(阶段1): 请求误差1, 握手后记录一个物料颜色入队, 跑完整升降序列。每按一次记一个。
+///        - X 键(阶段2): 请求误差2, 按队列 FIFO 逐个颜色自动跑完所有升降序列。
+///        - B 键: 中止当前运行, 复位为 IDLE (队列保留)。
+///        上升沿触发, 序列自锁运行; A/X/B 的边沿检测与队列逻辑封装在 ArmSequence。
 void applyArmCommand(const InputState& input) {
-    g_arm_sequence->update(input.armServoTrigger);
+    g_arm_sequence->update(input.buttons.a, input.buttons.x, input.buttons.b);
 }
 
 }  // namespace
@@ -137,7 +141,7 @@ void setup() {
 
     // ---- 初始化视觉数据串口 (Serial1) ----
     // GPIO18 = RX (接树莓派 TX), GPIO19 = TX (接树莓派 RX)
-    // 协议: 0xAA + ID(uint8) + 角度误差(int16 LE) + 前后误差(int16 LE), 共 6 字节
+    // 协议: 0xAA + ID1(uint8) + ID2(uint8) + 角度误差(int16 LE) + 前后误差(int16 LE), 共 8 字节
     g_vision_serial = new VisionSerial(kVisionBaudRate, kVisionRxPin, kVisionTxPin);
 
     // 初始化机械臂任务编排 (依赖 ArmControl 与 VisionSerial, 须在二者之后创建)
@@ -154,7 +158,6 @@ void setup() {
     // 角度轴和前后轴使用相同的 PID 增益, 可根据实际调试效果分别调整
     g_arm_control->setAnglePID(kArmAngleKp, kArmAngleKi, kArmAngleKd);
     g_arm_control->setForwardPID(kArmForwardKp, kArmForwardKi, kArmForwardKd);
-    Serial.println("PID parameters: Kp=30.0, Ki=0.5, Kd=5.0");
 
     Serial.println("Initialization complete");
 }
