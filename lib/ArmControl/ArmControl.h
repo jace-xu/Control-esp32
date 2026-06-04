@@ -46,13 +46,13 @@ public:
 
     /**
      * @brief Create arm control object
-     * @param serial The serial for controlling motors (shared with chassis)
+     * @note Motors share the single Serial2 bus via ControlSerial::get_instance()
      */
-    ArmControl(ControlSerial& serial) {
-        this->control_serial = &serial;
-        this->angle_motor = new Motor(serial, 5);
-        this->vertical_motor = new Motor(serial, 6);
-        this->forward_motor = new Motor(serial, 7);
+    ArmControl() {
+        this->control_serial = &(ControlSerial::get_instance());
+        this->angle_motor = new Motor(5);
+        this->vertical_motor = new Motor(6);
+        this->forward_motor = new Motor(7);
     }
 
     /// @brief Destruct the object
@@ -135,7 +135,7 @@ public:
             angle_error_last = 0.0f;
         }
 
-        this->angle_motor->set_rpm(angle_rpm);
+        this->angle_motor->set_rotate_speed(angle_rpm);
 
         // ========== 前后轴 PID 控制 ==========
         float forward_rpm = 0.0f;
@@ -171,7 +171,7 @@ public:
             forward_error_last = 0.0f;
         }
 
-        this->forward_motor->set_rpm(forward_rpm);
+        this->forward_motor->set_rotate_speed(forward_rpm);
     }
 
     /**
@@ -179,16 +179,18 @@ public:
      * @param rpm Rotation speed, positive = up, negative = down
      */
     void manualVertical(float rpm) {
-        this->vertical_motor->set_rpm(rpm);
+        this->vertical_motor->set_rotate_speed(rpm);
     }
 
     /**
-     * @brief Set vertical motor to absolute position (RESERVED - uses set_position)
+     * @brief Set vertical motor to absolute position (RESERVED - not implemented)
      * @param position Target position in degrees or encoder counts
-     * @note This calls the RESERVED set_position interface
+     * @note RESERVED: position-control protocol is not implemented yet. Current
+     *       vertical motion uses open-loop speed control (manualVertical). Once a
+     *       position command is available on the motor bus, fill in this body.
      */
     void setVerticalPosition(float position) {
-        this->control_serial->set_position(6, position);
+        (void)position;  // RESERVED - user to implement position protocol
     }
 
     /**

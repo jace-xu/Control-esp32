@@ -1,5 +1,5 @@
 #pragma once
-#include <Motor.h>
+#include<ControlSerial.h>
 
 #define BOTTOMCONTROL_WHEEL_RADIUS 30 /// Wheel radius, in millimeter
 #define BOTTOMCONTROL_LX 107.0f /// Half distance in X direction between wheel center to car center, in millimeter
@@ -19,10 +19,6 @@
 class BottomControl{
     private:
         ControlSerial* control_serial = nullptr; /// Point to control serial object
-        Motor* front_left = nullptr; /// Point to front left motor object
-        Motor* front_right = nullptr; /// Point to front right motor object
-        Motor* back_left = nullptr; /// Point to back left motor object
-        Motor* back_right = nullptr; /// Point to back right motor object
     
     public: // Initialization
         //Disabled copying and quotation
@@ -30,21 +26,7 @@ class BottomControl{
         BottomControl& operator=(const BottomControl&) = delete;
     
         /// @brief Create bottom control instance
-        BottomControl(){
-            this->control_serial = &(ControlSerial::get_instance());
-            this->front_left = new Motor(1);
-            this->front_right = new Motor(2);
-            this->back_left = new Motor(3);
-            this->back_right = new Motor(4);
-        }
-
-        /// @brief Destruct the instance
-        ~BottomControl(){
-            delete this->front_left;
-            delete this->front_right;
-            delete this->back_left;
-            delete this->back_right;
-        }
+        BottomControl(){this->control_serial = &(ControlSerial::get_instance());}
 
         /// @brief Get the reference of the only instance
         /// @return Reference of the only instance
@@ -52,37 +34,6 @@ class BottomControl{
             static BottomControl instance;
             return instance;
         }
-    
-    public: // Functions for thread lock and long command operation
-		/**
-         * @brief Lock the usage of the control serial in current thread
-         * @note If you want to perform a series of operations in a thread, please lock(), and perform you operations, and finally unlock()
-         * @note [ ! ] "lock()" and "unlock()" must be used in pairs
-         * @note [ ! ] If you lock() but do not unlock(), other threads will be stopped forever
-         * @note [ ! ] If you unlock() without lock() before, the program may crash
-         */
-		void thread_lock(){this->control_serial->thread_lock();}
-
-		/**
-         * @brief Unlock the usage of the control serial in current thread
-         * @note If you want to perform a series of operations in a thread, please lock(), and perform you operations, and finally unlock()
-         * @note [ ! ] "lock()" and "unlock()" must be used in pairs
-         * @note [ ! ] If you lock() but do not unlock(), other threads will be stopped forever
-         * @note [ ! ] If you unlock() without lock() before, the program may crash
-         */
-		void thread_unlock(){this->control_serial->thread_unlock();}
-
-		/**
-		 * @brief Clearing the long command you buffered before
-		 */
-		void clear_long_command(){this->control_serial->clear_long_command();}
-
-		/**
-		 * @brief Sending the long command you buffered before
-		 * @note If you send the long command successfully, the long command will be clear
-		 * @note If you didn't buffer a long_command after last sending, nothing will be sent
-		 */
-		void send_long_command(){this->control_serial->send_long_command();}
     
     public: // Functions for controling the bottom directly
         /**
@@ -92,10 +43,14 @@ class BottomControl{
         void stop(){
             this->control_serial->thread_lock();
             this->control_serial->clear_long_command();
-            this->front_left->append_stop_command();
-            this->front_right->append_stop_command();
-            this->back_left->append_stop_command();
-            this->back_right->append_stop_command();
+            this->control_serial->generate_stop_command(1);
+            this->control_serial->append_command();
+            this->control_serial->generate_stop_command(2);
+            this->control_serial->append_command();
+            this->control_serial->generate_stop_command(3);
+            this->control_serial->append_command();
+            this->control_serial->generate_stop_command(4);
+            this->control_serial->append_command();
             this->control_serial->send_long_command();
             this->control_serial->thread_unlock();
         }
@@ -116,10 +71,14 @@ class BottomControl{
             rotate_speeds[3] = -(velocities[0] + velocities[1] + (BOTTOMCONTROL_LX + BOTTOMCONTROL_LY) * velocities[2]) * 30 / BOTTOMCONTROL_PI / BOTTOMCONTROL_WHEEL_RADIUS;
             this->control_serial->thread_lock();
             this->control_serial->clear_long_command();
-            this->front_left->append_set_rotate_speed_command(rotate_speeds[0]);
-            this->front_right->append_set_rotate_speed_command(rotate_speeds[1]);
-            this->back_left->append_set_rotate_speed_command(rotate_speeds[2]);
-            this->back_right->append_set_rotate_speed_command(rotate_speeds[3]);
+            this->control_serial->Emm_generate_set_rotate_speed_command(1, rotate_speeds[0]);
+            this->control_serial->append_command();
+            this->control_serial->Emm_generate_set_rotate_speed_command(2, rotate_speeds[1]);
+            this->control_serial->append_command();
+            this->control_serial->Emm_generate_set_rotate_speed_command(3, rotate_speeds[2]);
+            this->control_serial->append_command();
+            this->control_serial->Emm_generate_set_rotate_speed_command(4, rotate_speeds[3]);
+            this->control_serial->append_command();
             this->control_serial->send_long_command();
             this->control_serial->thread_unlock();
         }
@@ -132,10 +91,14 @@ class BottomControl{
         void append_stop_command(){
             this->control_serial->thread_lock();
             this->control_serial->clear_long_command();
-            this->front_left->append_stop_command();
-            this->front_right->append_stop_command();
-            this->back_left->append_stop_command();
-            this->back_right->append_stop_command();
+            this->control_serial->generate_stop_command(1);
+            this->control_serial->append_command();
+            this->control_serial->generate_stop_command(2);
+            this->control_serial->append_command();
+            this->control_serial->generate_stop_command(3);
+            this->control_serial->append_command();
+            this->control_serial->generate_stop_command(4);
+            this->control_serial->append_command();
             this->control_serial->thread_unlock();
         }
 
@@ -155,10 +118,14 @@ class BottomControl{
             rotate_speeds[3] = -(velocities[0] + velocities[1] + (BOTTOMCONTROL_LX + BOTTOMCONTROL_LY) * velocities[2]) * 30 / BOTTOMCONTROL_PI / BOTTOMCONTROL_WHEEL_RADIUS;
             this->control_serial->thread_lock();
             this->control_serial->clear_long_command();
-            this->front_left->append_set_rotate_speed_command(rotate_speeds[0]);
-            this->front_right->append_set_rotate_speed_command(rotate_speeds[1]);
-            this->back_left->append_set_rotate_speed_command(rotate_speeds[2]);
-            this->back_right->append_set_rotate_speed_command(rotate_speeds[3]);
+            this->control_serial->Emm_generate_set_rotate_speed_command(1, rotate_speeds[0]);
+            this->control_serial->append_command();
+            this->control_serial->Emm_generate_set_rotate_speed_command(2, rotate_speeds[1]);
+            this->control_serial->append_command();
+            this->control_serial->Emm_generate_set_rotate_speed_command(3, rotate_speeds[2]);
+            this->control_serial->append_command();
+            this->control_serial->Emm_generate_set_rotate_speed_command(4, rotate_speeds[3]);
+            this->control_serial->append_command();
             this->control_serial->thread_unlock();
         }
 };

@@ -2,8 +2,9 @@
 #include<Arduino.h>
 
 #define CONTROLSERIAL_DELAY_TIME_WHILE_CHANGE_SERIAL 1000
+#define CONTROLSERIAL_RECEIVE_WAIT_TIME 1
 #define CONTROLSERIAL_COMMAND_MAX_LENGTH 16
-#define CONTROLSERIAL_LONG_COMMAND_MAX_LENGTH 96
+#define CONTROLSERIAL_LONG_COMMAND_MAX_LENGTH 128
 
 /**
  * @brief This is the tool class for control serial
@@ -117,7 +118,7 @@ class ControlSerial{
          */
         void send_command(){
             this->thread_lock();
-            if ((!this->initialized) || (this->command_length == 0)){
+            if ((!this->initialized) || (!this->command_length)){
                 this->thread_unlock();
                 return;
             }
@@ -147,7 +148,7 @@ class ControlSerial{
          */
         void append_command(){
             this->thread_lock();
-            if ((!this->initialized) || (this->command_length == 0) || (this->command_length + this->long_command_length + 1> CONTROLSERIAL_LONG_COMMAND_MAX_LENGTH)){
+            if ((!this->initialized) || (!this->command_length) || (this->command_length + this->long_command_length + 1> CONTROLSERIAL_LONG_COMMAND_MAX_LENGTH)){
                 this->thread_unlock();
                 return;
             }
@@ -176,6 +177,68 @@ class ControlSerial{
             this->thread_unlock();
         }
     
+    public: // Functions for getting information
+        /**
+         * @brief Clearing the data in hardware
+         * @note If some data is sending by motor in current, the function will wait and clear all data which is sent now
+         */
+        void clear_received_data(){
+            this->thread_lock();
+            if (!this->initialized){
+                this->thread_unlock();
+                return;
+            }
+            unsigned long time = millis();
+            while(1){
+                if (Serial2.available()){
+                    Serial2.read();
+                    time = millis();
+                }
+                else{if (static_cast<int>(millis() - time) > CONTROLSERIAL_RECEIVE_WAIT_TIME){break;}}
+            }
+            this->thread_unlock();
+        }
+
+        /**
+         * @brief (X) Reading the current position data buffered in hardware
+         * @param current_position A reference of a float variable, in degree
+         * @return Whether successfully read data or not
+         * @note +current_position -> CW
+         * @note The function will change the variable as the current position
+         * @note If fail to read data, the variable will not be changed
+         * @note If the data you received is invalid, all the data in hardware will be cleared
+         */
+        bool X_read_current_position(float& current_position){
+            this->thread_lock();
+            if (!this->initialized){
+                this->thread_unlock();
+                return false;
+            }
+            uint8_t current_position_data[8];
+            uint8_t current_position_byte = 0;
+            unsigned long time = millis();
+            while(current_position_byte < 8){
+                if (Serial2.available()){
+                    current_position_data[current_position_byte++] = Serial2.read();
+                    time = millis();
+                }
+                else{if (static_cast<int>(millis() - time) > CONTROLSERIAL_RECEIVE_WAIT_TIME){break;}}
+            }
+            if (current_position_byte == 8){
+                if (current_position_data[1] == 0x36){
+                    if (current_position_data[7] == 0x6B){
+                        current_position = static_cast<float>((current_position_data[3] << 24) | (current_position_data[4] << 16) | (current_position_data[5] << 8) | (current_position_data[6])) / 10;
+                        if (current_position_data[2]){current_position = -current_position;}
+                        this->thread_unlock();
+                        return true;
+                    }
+                }
+            }
+            this->clear_received_data();
+            this->thread_unlock();
+            return false;
+        }
+    
     public: // Functions for generating and buffering commands
         /**
 		 * @brief Generating and buffering the command of changing the address
@@ -185,7 +248,7 @@ class ControlSerial{
          * @note If there is a command generated before, the now command will cover the old one
 		 * @note [ ! ] Try not to use
 		 */
-        void generate_change_address_command(int old_address, int new_address, bool save){
+        void generate_change_address_command(int old_address, int new_address, bool save=true){
             this->thread_lock();
             if (!this->initialized){
                 this->thread_unlock();
@@ -207,7 +270,7 @@ class ControlSerial{
          * @param sync Whether execute the command synchronously or not
          * @note If there is a command generated before, the now command will cover the old one
          */
-        void generate_stop_command(int address, bool sync){
+        void generate_stop_command(int address, bool sync=false){
             this->thread_lock();
             if (!this->initialized){
                 this->thread_unlock();
@@ -223,7 +286,7 @@ class ControlSerial{
         }
 
         /**
-         * @brief Generating and buffering the command of setting rotation speed
+         * @brief (Emm) Generating and buffering the command of setting rotation speed
          * @param address The address of the motor you want to control (0 ~ 255)
          * @param rotate_speed Rotation speed in rpm (0 ~ 3000)
          * @param acceleration Acceleration grade of changing rotation speed (0 ~ 255)
@@ -233,7 +296,7 @@ class ControlSerial{
          * @note If there is a command generated before, the now command will cover the old one
          * @note [ ! ] "S_Vel_IS" in motor should be enabled
          */
-        void generate_set_rotate_speed_command(int address, float rotate_speed, int acceleration, bool sync){
+        void Emm_generate_set_rotate_speed_command(int address, float rotate_speed, int acceleration=0, bool sync=false){
             bool direction = false;
             int final_rotate_speed = static_cast<int>(std::round(10 * rotate_speed));
             if (final_rotate_speed < 0){
@@ -254,6 +317,28 @@ class ControlSerial{
             this->command[6] = sync;
             this->command[7] = 0x6B;
             this->command_length = 8;
+            this->thread_unlock();
+        }
+    
+    public: // Functions for asking information
+        /**
+         * @brief Asking current position of the motor
+         * @param address The address of the motor you want to control (1 ~ 255)
+         * @note After asking, you should wait a moment and then read
+         * @note It will directly send the command
+         * @note [ ! ] "Response" in all motors should be "None", or the received data may be invalid
+         */
+        void ask_current_position(int address){
+            this->thread_lock();
+            if (!this->initialized){
+                this->thread_unlock();
+                return;
+            }
+            this->command[0] = address;
+            this->command[1] = 0x36;
+            this->command[2] = 0x6B;
+            this->command_length = 3;
+            this->send_command();
             this->thread_unlock();
         }
 };
