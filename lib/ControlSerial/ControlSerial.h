@@ -203,7 +203,7 @@ class ControlSerial{
          * @brief (X) Reading the current position data buffered in hardware
          * @param current_position A reference of a float variable, in degree
          * @return Whether successfully read data or not
-         * @note +current_position -> CW
+         * @note +current_position -> CW, means the absolute angle position from 0 point (the place when the motor booting)
          * @note The function will change the variable as the current position
          * @note If fail to read data, the variable will not be changed
          * @note If the data you received is invalid, all the data in hardware will be cleared
@@ -288,7 +288,7 @@ class ControlSerial{
         /**
          * @brief (Emm) Generating and buffering the command of setting rotation speed
          * @param address The address of the motor you want to control (0 ~ 255)
-         * @param rotate_speed Rotation speed in rpm (0 ~ 3000)
+         * @param rotate_speed Rotation speed in rpm (-3000 ~ 3000)
          * @param acceleration Acceleration grade of changing rotation speed (0 ~ 255)
          * @param sync Whether execute the command synchronously or not
          * @note +rotate_speed -> CW
@@ -301,8 +301,8 @@ class ControlSerial{
             int final_rotate_speed = static_cast<int>(std::round(10 * rotate_speed));
             if (final_rotate_speed < 0){
                 direction = true;
-                final_rotate_speed = -final_rotate_speed;}
-
+                final_rotate_speed = -final_rotate_speed;
+            }
             this->thread_lock();
             if (!this->initialized){
                 this->thread_unlock();
@@ -320,12 +320,90 @@ class ControlSerial{
             this->thread_unlock();
         }
     
-    public: // Functions for asking information
+        /**
+         * @brief (X) Generating and buffering the command of setting rotation speed
+         * @param address The address of the motor you want to control (0 ~ 255)
+         * @param rotate_speed Rotation speed in rpm (-3000 ~ 3000)
+         * @param acceleration Acceleration value in rpm/s (1 ~ 65535)
+         * @param sync Whether execute the command synchronously or not
+         * @note +rotate_speed -> CW
+         * @note If there is a command generated before, the now command will cover the old one
+         */
+        void X_generate_set_rotate_speed_command(int address, float rotate_speed, int acceleration=65535, bool sync=false){
+            bool direction = false;
+            int final_rotate_speed = static_cast<int>(std::round(10 * rotate_speed));
+            if (final_rotate_speed < 0){
+                direction = true;
+                final_rotate_speed = -final_rotate_speed;
+            }
+            this->thread_lock();
+            if (!this->initialized){
+                this->thread_unlock();
+                return;
+            }
+            this->command[0] = address;
+            this->command[1] = 0xF6;
+            this->command[2] = direction;
+            this->command[3] = (acceleration >> 8) & 0xFF;
+            this->command[4] = acceleration & 0xFF;
+            this->command[5] = (final_rotate_speed >> 8) & 0xFF;
+            this->command[6] = final_rotate_speed & 0xFF;
+            this->command[7] = sync;
+            this->command[8] = 0x6B;
+            this->command_length = 9;
+            this->thread_unlock();
+        }
+
+        /**
+         * @brief (X) Generating and buffering the command of setting position
+         * @param address The address of the motor you want to control (0 ~ 255)
+         * @param position The absolute position you want the motor to move to in degree (-429496729.5 ~ 429496729.5)
+         * @param rotate_speed The max rotation speed when the motor move in rpm (0.1 ~ 3000)
+         * @param acceleration_init Acceleration value when starting to move in rpm/s (1 ~ 65535)
+         * @param acceleration_final Acceleration value when stopping in rpm/s (1 ~ 65535)
+         * @param sync Whether execute the command synchronously or not
+         * @note +position -> CW, means the absolute angle position from 0 point (the place when the motor booting)
+         * @note If there is a command generated before, the now command will cover the old one
+         */
+        void X_generate_set_move_angle_command(int address, float position, float rotate_speed, int acceleration_init=65535, int acceleration_final=65535, bool sync=false){
+            bool direction = false;
+            int final_position = static_cast<int>(std::round(10 * position));
+            if (final_position < 0){
+                direction = true;
+                final_position = -final_position;
+            }
+            int final_rotate_speed = static_cast<int>(std::round(10 * rotate_speed));
+            this->thread_lock();
+            if (!this->initialized){
+                this->thread_unlock();
+                return;
+            }
+            this->command[0] = address;
+            this->command[1] = 0xFD;
+            this->command[2] = direction;
+            this->command[3] = (acceleration_init >> 8) & 0xFF;
+            this->command[4] = acceleration_init & 0xFF;
+            this->command[5] = (acceleration_final >> 8) & 0xFF;
+            this->command[6] = acceleration_final & 0xFF;
+            this->command[7] = (final_rotate_speed >> 8) & 0xFF;
+            this->command[8] = final_rotate_speed & 0xFF;
+            this->command[9] = (final_position >> 24) & 0xFF;
+            this->command[10] = (final_position >> 16) & 0xFF;
+            this->command[11] = (final_position >> 8) & 0xFF;
+            this->command[12] = final_position & 0xFF;
+            this->command[13] = 0x01;
+            this->command[14] = sync;
+            this->command[15] = 0x6B;
+            this->command_length = 16;
+            this->thread_unlock();
+        }
+    
+    public: // Other functions
         /**
          * @brief Asking current position of the motor
          * @param address The address of the motor you want to control (1 ~ 255)
          * @note After asking, you should wait a moment and then read
-         * @note It will directly send the command
+         * @note It will directly send the command of asking current position
          * @note [ ! ] "Response" in all motors should be "None", or the received data may be invalid
          */
         void ask_current_position(int address){
@@ -338,6 +416,28 @@ class ControlSerial{
             this->command[1] = 0x36;
             this->command[2] = 0x6B;
             this->command_length = 3;
+            this->send_command();
+            this->thread_unlock();
+        }
+
+        /**
+         * @brief Start synchronous movement
+         * @param address The address of the motor you want to control (1 ~ 255)
+         * @note If you use command(sync=true) before, the command will be buffered by the motor
+         * @note So when you use this function, the motor will start to execute the command
+         * @note It will directly send the command of starting synchronous movement
+         */
+        void start_sync_move(int address){
+            this->thread_lock();
+            if (!this->initialized){
+                this->thread_unlock();
+                return;
+            }
+            this->command[0] = address;
+            this->command[1] = 0xFF;
+            this->command[2] = 0x66;
+            this->command[3] = 0x6B;
+            this->command_length = 4;
             this->send_command();
             this->thread_unlock();
         }
