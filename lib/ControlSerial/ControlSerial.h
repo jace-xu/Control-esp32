@@ -203,7 +203,7 @@ class ControlSerial{
          * @brief (X) Reading the current position data buffered in hardware
          * @param current_position A reference of a float variable, in degree
          * @return Whether successfully read data or not
-         * @note +current_position -> CW, means the absolute angle position from 0 point (the place when the motor booting)
+         * @note +current_position -> CW (looking outward), means the absolute angle position from 0 point (the place when the motor booting)
          * @note The function will change the variable as the current position
          * @note If fail to read data, the variable will not be changed
          * @note If the data you received is invalid, all the data in hardware will be cleared
@@ -291,7 +291,7 @@ class ControlSerial{
          * @param rotate_speed Rotation speed in rpm (-3000 ~ 3000)
          * @param acceleration Acceleration grade of changing rotation speed (0 ~ 255)
          * @param sync Whether execute the command synchronously or not
-         * @note +rotate_speed -> CW
+         * @note +rotate_speed -> CW (looking outawrd)
          * @note "acceleration" is not real
          * @note If there is a command generated before, the now command will cover the old one
          * @note [ ! ] "S_Vel_IS" in motor should be enabled
@@ -326,7 +326,7 @@ class ControlSerial{
          * @param rotate_speed Rotation speed in rpm (-3000 ~ 3000)
          * @param acceleration Acceleration value in rpm/s (1 ~ 65535)
          * @param sync Whether execute the command synchronously or not
-         * @note +rotate_speed -> CW
+         * @note +rotate_speed -> CW (looking outawrd)
          * @note If there is a command generated before, the now command will cover the old one
          */
         void X_generate_set_rotate_speed_command(int address, float rotate_speed, int acceleration=65535, bool sync=false){
@@ -362,10 +362,10 @@ class ControlSerial{
          * @param acceleration_init Acceleration value when starting to move in rpm/s (1 ~ 65535)
          * @param acceleration_final Acceleration value when stopping in rpm/s (1 ~ 65535)
          * @param sync Whether execute the command synchronously or not
-         * @note +position -> CW, means the absolute angle position from 0 point (the place when the motor booting)
+         * @note +position -> CW (looking outawrd), means the absolute angle position from 0 point (the place when the motor booting)
          * @note If there is a command generated before, the now command will cover the old one
          */
-        void X_generate_set_move_angle_command(int address, float position, float rotate_speed, int acceleration_init=65535, int acceleration_final=65535, bool sync=false){
+        void X_generate_set_position_command(int address, float position, float rotate_speed, int acceleration_init=65535, int acceleration_final=65535, bool sync=false){
             bool direction = false;
             int final_position = static_cast<int>(std::round(10 * position));
             if (final_position < 0){
