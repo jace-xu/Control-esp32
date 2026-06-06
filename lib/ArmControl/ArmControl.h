@@ -1,20 +1,37 @@
 #pragma once
-#include <Motor.h>
+#include <ControlSerial.h>
+#include <Arduino.h>
 #include <cmath>
 
 /**
  * @brief Arm control class for visual servoing and manual control
- * @note Manages 3 motors: angle (address 5), vertical (address 6), forward (address 7)
+ * @note Manages 3 motors via ControlSerial: angle (addr 5), vertical (addr 6), forward (addr 7)
  * @note Addresses 5-7 share the same Serial2 bus with chassis motors (addresses 1-4)
+ * @note 夹爪由 ESP32 LEDC PWM 驱动一个舵机 (grip/release 到固定角度)
  * @note [ ! ] Only can be created once in the whole program
  * @note == Version 1.0.0 ==
  */
 class ArmControl {
 private:
-    ControlSerial* control_serial = nullptr;
-    Motor* angle_motor = nullptr;      // Address 5: rotation angle
-    Motor* vertical_motor = nullptr;   // Address 6: up/down
-    Motor* forward_motor = nullptr;    // Address 7: forward/backward
+    // 三个机械臂电机的总线地址 (与底盘电机 1~4 错开)
+    static constexpr int kAngleAddr = 5;      // 角度电机: 旋转对准
+    static constexpr int kVerticalAddr = 6;   // 上下电机: 升降
+    static constexpr int kForwardAddr = 7;    // 前后电机: 进给对准
+
+    // ---- 夹爪舵机 (ESP32 LEDC PWM) ----
+    // [ ! ] 以下引脚/角度为占位默认值, 请按实际硬件修改
+    static constexpr int kGripperPin = 13;        // 舵机信号引脚 (GPIO)
+    static constexpr int kGripperPwmChannel = 4;  // LEDC 通道 (避开底盘可能占用的 0~3)
+    static constexpr int kGripperPwmFreq = 50;    // 舵机标准 50Hz
+    static constexpr int kGripperPwmResBits = 16; // PWM 分辨率位数
+    static constexpr float kGripperClosedAngle = 0.0f;   // 夹紧角度 (度)
+    static constexpr float kGripperOpenAngle = 90.0f;    // 松开角度 (度)
+    // 舵机脉宽范围 (微秒): 多数舵机 0.5ms~2.5ms 对应 0~180 度
+    static constexpr float kGripperMinPulseUs = 500.0f;
+    static constexpr float kGripperMaxPulseUs = 2500.0f;
+
+    ControlSerial* control_serial = nullptr;  // 共用的 Serial2 命令通道 (单例)
+
 
     // PID controller parameters (tunable)
     float kp_angle = 30.0f;       // P gain for angle servo
@@ -39,6 +56,10 @@ private:
     // Anti-windup limits (防止积分饱和)
     float integral_limit = 1000.0f;        // 积分项限制
 
+    // 上下电机当前指令 (不参与 PID, 由 manualVertical 设定; 伺服帧把它一并打包进长命令)
+    // 最终该电机改用位置模式, 这里只是"当前要维持的上下指令值"的缓存
+    float vertical_rpm = 0.0f;             // 上下电机当前速度指令 (rpm), 正=上升 负=下降
+
 public:
     // Disabled copying and assignment
     ArmControl(const ArmControl&) = delete;
@@ -47,28 +68,49 @@ public:
     /**
      * @brief Create arm control object
      * @note Motors share the single Serial2 bus via ControlSerial::get_instance()
+     * @note 同时初始化夹爪舵机的 LEDC PWM, 上电默认松开
      */
     ArmControl() {
         this->control_serial = &(ControlSerial::get_instance());
-        this->angle_motor = new Motor(5);
-        this->vertical_motor = new Motor(6);
-        this->forward_motor = new Motor(7);
+        // 初始化夹爪舵机 PWM (ESP32 Arduino core 2.x: 通道制 LEDC)
+        ledcSetup(kGripperPwmChannel, kGripperPwmFreq, kGripperPwmResBits);
+        ledcAttachPin(kGripperPin, kGripperPwmChannel);
+        release();  // 上电默认松开夹爪
     }
 
     /// @brief Destruct the object
     ~ArmControl() {
-        delete this->angle_motor;
-        delete this->vertical_motor;
-        delete this->forward_motor;
+        ledcDetachPin(kGripperPin);
+    }
+
+public:
+    // ========================================================================
+    // 夹爪舵机控制
+    // ========================================================================
+
+    /// @brief 夹紧夹爪 (舵机转到夹紧角度)
+    void grip() {
+        setGripperAngle(kGripperClosedAngle);
+    }
+
+    /// @brief 松开夹爪 (舵机转到松开角度)
+    void release() {
+        setGripperAngle(kGripperOpenAngle);
     }
 
 public:
     /// @brief Stop all arm motors
     /// @note Also resets PID state so a later servo session starts clean.
     void stop() {
-        this->angle_motor->stop();
-        this->vertical_motor->stop();
-        this->forward_motor->stop();
+        this->vertical_rpm = 0.0f;  // 上下电机已停, 清缓存防止伺服帧重新启动它
+        this->control_serial->thread_lock();
+        this->control_serial->generate_stop_command(kAngleAddr);
+        this->control_serial->send_command();
+        this->control_serial->generate_stop_command(kVerticalAddr);
+        this->control_serial->send_command();
+        this->control_serial->generate_stop_command(kForwardAddr);
+        this->control_serial->send_command();
+        this->control_serial->thread_unlock();
         resetPID();
     }
 
@@ -76,8 +118,12 @@ public:
     /// @note Also resets PID state (integral/derivative) to prevent windup on resume.
     ///       Vertical motor is speed-controlled and not affected by resetPID().
     void stopServo() {
-        this->angle_motor->stop();
-        this->forward_motor->stop();
+        this->control_serial->thread_lock();
+        this->control_serial->generate_stop_command(kAngleAddr);
+        this->control_serial->send_command();
+        this->control_serial->generate_stop_command(kForwardAddr);
+        this->control_serial->send_command();
+        this->control_serial->thread_unlock();
         resetPID();
     }
 
@@ -135,8 +181,7 @@ public:
             angle_error_last = 0.0f;
         }
 
-        this->angle_motor->set_rotate_speed(angle_rpm);
-
+      
         // ========== 前后轴 PID 控制 ==========
         float forward_rpm = 0.0f;
 
@@ -171,7 +216,21 @@ public:
             forward_error_last = 0.0f;
         }
 
-        this->forward_motor->set_rotate_speed(forward_rpm);
+        // 角度 + 前后 + 上下 三条速度命令合并为一条长命令一次性下发:
+        // 单次总线事务, 三个电机更同步, 也省去逐条 flush 的开销。
+        // 上下电机不参与 PID, 用 vertical_rpm 缓存的当前指令一并重发 (速度模式幂等, 无副作用)。
+        // 全程持锁, 防止 append 序列被其他线程的命令插入而错帧。
+        // TODO: 机械臂电机将改用 X_generate_set_rotate_speed_command, 该指令暂未实现, 先用 Emm 版
+        this->control_serial->thread_lock();
+        this->control_serial->clear_long_command();
+        this->control_serial->Emm_generate_set_rotate_speed_command(kAngleAddr, angle_rpm);
+        this->control_serial->append_command();
+        this->control_serial->Emm_generate_set_rotate_speed_command(kForwardAddr, forward_rpm);
+        this->control_serial->append_command();
+        this->control_serial->Emm_generate_set_rotate_speed_command(kVerticalAddr, this->vertical_rpm);
+        this->control_serial->append_command();
+        this->control_serial->send_long_command();
+        this->control_serial->thread_unlock();
     }
 
     /**
@@ -179,7 +238,12 @@ public:
      * @param rpm Rotation speed, positive = up, negative = down
      */
     void manualVertical(float rpm) {
-        this->vertical_motor->set_rotate_speed(rpm);
+        this->vertical_rpm = rpm;  // 记录当前指令, 后续伺服帧会随角度/前后一起重发
+        this->control_serial->thread_lock();
+        // TODO: 机械臂电机将改用 X_generate_set_rotate_speed_command, 该指令暂未实现, 先用 Emm 版
+        this->control_serial->Emm_generate_set_rotate_speed_command(kVerticalAddr, rpm);
+        this->control_serial->send_command();
+        this->control_serial->thread_unlock();
     }
 
     /**
@@ -252,5 +316,24 @@ public:
         forward_error_integral = 0.0f;
         forward_error_last = 0.0f;
         last_update_time = 0;
+    }
+
+private:
+    /**
+     * @brief 驱动夹爪舵机到指定角度
+     * @param angle 目标角度 (度), 会被限幅到 [0, 180]
+     * @note  角度 → 脉宽(us) → LEDC 占空比, 50Hz 周期为 20000us
+     */
+    void setGripperAngle(float angle) {
+        if (angle < 0.0f) angle = 0.0f;
+        if (angle > 180.0f) angle = 180.0f;
+        // 角度线性映射到脉宽
+        float pulse_us = kGripperMinPulseUs +
+            (kGripperMaxPulseUs - kGripperMinPulseUs) * (angle / 180.0f);
+        // 脉宽 → 占空比: duty = pulse / period * (2^bits - 1), 周期 = 1e6/freq us
+        const float period_us = 1000000.0f / kGripperPwmFreq;
+        const uint32_t max_duty = (1u << kGripperPwmResBits) - 1u;
+        uint32_t duty = static_cast<uint32_t>((pulse_us / period_us) * max_duty);
+        ledcWrite(kGripperPwmChannel, duty);
     }
 };

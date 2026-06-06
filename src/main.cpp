@@ -210,6 +210,7 @@ void loop() {
     if (input.hasFreshData) {
         g_last_fresh_input_ms = input.timestampMs;
         applyChassisCommand(input);   // 更新底盘速度
+        delay(5);  // 底盘指令下发后短暂延迟, 确保 Serial2 总线有时间处理指令, 再下发机械臂指令
         applyArmCommand(input);       // 更新机械臂控制 (视觉伺服 + 上下序列)
     } else if ((!g_is_stopped || g_arm_sequence->isActive()) &&
                (input.timestampMs - g_last_fresh_input_ms) > kFreshDataGraceMs) {

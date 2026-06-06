@@ -33,8 +33,6 @@ private:
         MODE_CONSUME, // 阶段2 (X键): 请求误差2, 按队列 FIFO 逐个颜色跑序列直到队空
     };
 
-    // 颜色队列容量 (阶段1 最多可记录多少个待抓物料)
-    static constexpr uint8_t kColorQueueCapacity = 16;
 
     // ========================================================================
     // 上下电机自动序列参数 (按住 A 键时执行)
@@ -88,6 +86,9 @@ private:
     // 任务模式与颜色队列
     SequenceMode mode = MODE_NONE;          // 当前任务模式
     bool color_recorded_this_run = false;   // 本轮(阶段1)是否已记录过颜色, 防止重复入队
+
+    // 颜色队列容量 (阶段1 最多可记录多少个待抓物料)
+    static constexpr uint8_t kColorQueueCapacity = 16;
 
     uint8_t color_queue[kColorQueueCapacity]; // 颜色环形队列
     uint8_t queue_head = 0;                 // 队首索引 (出队位置)
@@ -167,13 +168,7 @@ public:
      * @note  仅复位运行状态与模式; 颜色队列保留 (中止阶段1不清空已记录的颜色)。
      */
     void stop() {
-        stopVisionStream();  // 通知树莓派停止发送误差数据
-        if (arm != nullptr) {
-            arm->stop();
-        }
-        state = IDLE;
-        active = false;
-        mode = MODE_NONE;
+        haltAndReset();
     }
 
     /// @brief 清空颜色队列 (供 main 在需要时手动复位任务)
@@ -184,6 +179,40 @@ public:
     }
 
 private:
+    // ========================================================================
+    // 统一的停止原语
+    // ========================================================================
+
+    /**
+     * @brief 停所有机械臂电机并复位 PID, 通知树莓派停止串流
+     * @note  仅停电机, 不动状态机/自锁标志。供"正常跑完后回静止"与"彻底结束"复用。
+     */
+    void haltMotors() {
+        stopVisionStream();      // 通知树莓派停止发送误差数据
+        if (arm != nullptr) {
+            arm->stop();         // 停三个电机 (角度/上下/前后) 并复位 PID
+        }
+    }
+
+    /**
+     * @brief 复位状态机与自锁标志 (回到空闲, 不碰电机/队列)
+     */
+    void resetRunState() {
+        state = IDLE;
+        active = false;
+        mode = MODE_NONE;
+    }
+
+    /**
+     * @brief 彻底停止: 停电机 + 复位状态机 + 解除自锁
+     * @note  中止(B键) / 超时保护 / 队列耗尽 共用同一条停止路径, 避免多份实现不一致。
+     * @note  颜色队列不在此清空 (中止阶段1保留已记录的颜色)。
+     */
+    void haltAndReset() {
+        haltMotors();
+        resetRunState();
+    }
+
     // ========================================================================
     // 颜色队列操作 (FIFO 环形缓冲)
     // ========================================================================
@@ -272,9 +301,7 @@ private:
      */
     void finishRun(uint32_t currentTime) {
         // 先停掉本轮的串流与电机 (回到静止)
-        stopVisionStream();
-        arm->manualVertical(0.0f);
-        arm->stopServo();
+        haltMotors();
 
         if (mode == MODE_CONSUME) {
             uint8_t color = 0;
@@ -293,22 +320,7 @@ private:
         }
 
         // 阶段1 单轮完成, 或阶段2 队列耗尽: 彻底结束, 解除自锁
-        state = IDLE;
-        active = false;
-        mode = MODE_NONE;
-    }
-
-    /**
-     * @brief 异常停止当前序列 (超时保护): 停电机并解除自锁
-     * @note  与 finishRun() 区别: 此处用于超时等异常, 不推进队列, 直接结束本次任务。
-     */
-    void finishSequence() {
-        stopVisionStream();
-        arm->manualVertical(0.0f);
-        arm->stopServo();
-        state = IDLE;
-        active = false;
-        mode = MODE_NONE;
+        resetRunState();
     }
 
     /// @brief 请求树莓派开始发送视觉误差数据 (幂等: 已在串流则不重发)
@@ -383,8 +395,13 @@ private:
         // 从视觉串口读取树莓派发来的误差数据
         VisionError visionError = vision->read();
 
-        if (visionError.valid) {
-            // 数据有效: 确认握手成功 (停止 START 重传), 清除超时警告, 执行 PID 伺服
+        // 仅接受与本次请求误差类型匹配的帧 (id1: 1=误差1, 2=误差2)。
+        // 切换串流 (STOP→START) 的瞬间, 接收缓冲里可能残留上一类型的旧帧,
+        // 若不校验会导致: 提前误判握手成功、记错颜色、用旧误差驱动 PID。
+        bool frameMatches = visionError.valid && (visionError.id1 == stream_error_type);
+
+        if (frameMatches) {
+            // 类型匹配: 确认握手成功 (停止 START 重传), 清除超时警告, 执行 PID 伺服
             stream_confirmed = true;
             timeout_warned = false;
 
@@ -404,7 +421,7 @@ private:
                 last_debug_print = currentTime;
             }
         } else {
-            // 视觉数据无效 (串口无数据 / 解析失败 / 数据超时):
+            // 无有效帧 (串口无数据 / 解析失败 / 数据超时 / 误差类型不匹配):
             // 停止伺服电机并复位 PID 积分项, 防止数据恢复瞬间积分饱和 (windup) 导致窜动
             arm->stopServo();
 
@@ -441,7 +458,7 @@ private:
                 // 下降超时保护: 超过 15 秒强制停止
                 if ((currentTime - descent_start_time) > kDescentTimeoutMs) {
                     Serial.println("ERROR: Descent timeout! Stopping.");
-                    finishSequence();
+                    haltAndReset();  // 超时异常: 停机并复位, 不推进队列
                 }
                 break;
             }
@@ -477,7 +494,7 @@ private:
                 // 回升超时保护: 超过 12 秒强制停止
                 else if ((currentTime - ascent_start_time) > kAscentTimeoutMs) {
                     Serial.println("ERROR: Ascent timeout! Stopping.");
-                    finishSequence();
+                    haltAndReset();  // 超时异常: 停机并复位, 不推进队列
                 }
                 break;
             }
