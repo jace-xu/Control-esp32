@@ -9,7 +9,7 @@
  * @note Addresses 5-7 share the same Serial2 bus with chassis motors (addresses 1-4)
  * @note 夹爪由 ESP32 LEDC PWM 驱动一个舵机 (grip/release 到固定角度)
  * @note [ ! ] Only can be created once in the whole program
- * @note == Version 1.0.0 ==
+ * @note == Version 2.0.0 ==
  */
 class ArmControl {
 private:
@@ -24,8 +24,8 @@ private:
     static constexpr int kGripperPwmChannel = 4;  // LEDC 通道 (避开底盘可能占用的 0~3)
     static constexpr int kGripperPwmFreq = 50;    // 舵机标准 50Hz
     static constexpr int kGripperPwmResBits = 16; // PWM 分辨率位数
-    static constexpr float kGripperClosedAngle = 0.0f;   // 夹紧角度 (度)
-    static constexpr float kGripperOpenAngle = 90.0f;    // 松开角度 (度)
+    static constexpr float kGripperClosedAngle = 100.0f;   // 夹紧角度 (度)
+    static constexpr float kGripperOpenAngle = 180.0f;    // 松开角度 (度)
     // 舵机脉宽范围 (微秒): 多数舵机 0.5ms~2.5ms 对应 0~180 度
     static constexpr float kGripperMinPulseUs = 500.0f;
     static constexpr float kGripperMaxPulseUs = 2500.0f;
@@ -56,9 +56,12 @@ private:
     // Anti-windup limits (防止积分饱和)
     float integral_limit = 1000.0f;        // 积分项限制
 
-    // 上下电机当前指令 (不参与 PID, 由 manualVertical 设定; 伺服帧把它一并打包进长命令)
-    // 最终该电机改用位置模式, 这里只是"当前要维持的上下指令值"的缓存
-    float vertical_rpm = 0.0f;             // 上下电机当前速度指令 (rpm), 正=上升 负=下降
+    // 电机位置移动速度 (rpm), setPosition 时使用 (角度/上下电机共用)
+    static constexpr float kPosSpeed = 50.0f;
+
+    // 位置问询后等待电机回复的时间 (ms), readVerticalPosition 时使用
+    // 给电机收到问询、处理、回 8 字节的往返留出时间, 否则 read 会提前超时
+    static constexpr uint32_t kPositionReadDelayMs = 2;
 
 public:
     // Disabled copying and assignment
@@ -102,7 +105,6 @@ public:
     /// @brief Stop all arm motors
     /// @note Also resets PID state so a later servo session starts clean.
     void stop() {
-        this->vertical_rpm = 0.0f;  // 上下电机已停, 清缓存防止伺服帧重新启动它
         this->control_serial->thread_lock();
         this->control_serial->generate_stop_command(kAngleAddr);
         this->control_serial->send_command();
@@ -216,18 +218,15 @@ public:
             forward_error_last = 0.0f;
         }
 
-        // 角度 + 前后 + 上下 三条速度命令合并为一条长命令一次性下发:
-        // 单次总线事务, 三个电机更同步, 也省去逐条 flush 的开销。
-        // 上下电机不参与 PID, 用 vertical_rpm 缓存的当前指令一并重发 (速度模式幂等, 无副作用)。
+        // 角度 + 前后 两条速度命令合并为一条长命令一次性下发:
+        // 单次总线事务, 两个伺服电机更同步, 也省去逐条 flush 的开销。
+        // 上下电机已改用位置控制(设一次), 不在此每帧重发。
         // 全程持锁, 防止 append 序列被其他线程的命令插入而错帧。
-        // TODO: 机械臂电机将改用 X_generate_set_rotate_speed_command, 该指令暂未实现, 先用 Emm 版
         this->control_serial->thread_lock();
         this->control_serial->clear_long_command();
-        this->control_serial->Emm_generate_set_rotate_speed_command(kAngleAddr, angle_rpm);
+        this->control_serial->X_generate_set_rotate_speed_command(kAngleAddr, angle_rpm);
         this->control_serial->append_command();
-        this->control_serial->Emm_generate_set_rotate_speed_command(kForwardAddr, forward_rpm);
-        this->control_serial->append_command();
-        this->control_serial->Emm_generate_set_rotate_speed_command(kVerticalAddr, this->vertical_rpm);
+        this->control_serial->X_generate_set_rotate_speed_command(kForwardAddr, forward_rpm);
         this->control_serial->append_command();
         this->control_serial->send_long_command();
         this->control_serial->thread_unlock();
@@ -238,23 +237,56 @@ public:
      * @param rpm Rotation speed, positive = up, negative = down
      */
     void manualVertical(float rpm) {
-        this->vertical_rpm = rpm;  // 记录当前指令, 后续伺服帧会随角度/前后一起重发
         this->control_serial->thread_lock();
-        // TODO: 机械臂电机将改用 X_generate_set_rotate_speed_command, 该指令暂未实现, 先用 Emm 版
-        this->control_serial->Emm_generate_set_rotate_speed_command(kVerticalAddr, rpm);
+        this->control_serial->X_generate_set_rotate_speed_command(kVerticalAddr, rpm);
         this->control_serial->send_command();
         this->control_serial->thread_unlock();
     }
 
     /**
-     * @brief Set vertical motor to absolute position (RESERVED - not implemented)
-     * @param position Target position in degrees or encoder counts
-     * @note RESERVED: position-control protocol is not implemented yet. Current
-     *       vertical motion uses open-loop speed control (manualVertical). Once a
-     *       position command is available on the motor bus, fill in this body.
+     * @brief 通用电机位置控制 (绝对角度, 原样下发不取负)
+     * @param address        目标电机总线地址 (kAngleAddr / kVerticalAddr)
+     * @param positionDegrees 目标绝对角度 (度), 相对上电零点
+     * @note  使用 X_generate_set_position_command (0xFD), 电机自走到目标位置
+     * @note  方向约定交给调用方: 正角度→电机一个方向, 负角度→反方向 (底层命令天然行为)
+     * @note  内部不取负, 设一次即可, 电机内部闭环完成移动
      */
-    void setVerticalPosition(float position) {
-        (void)position;  // RESERVED - user to implement position protocol
+    void setPosition(int address, float positionDegrees) {
+        this->control_serial->thread_lock();
+        this->control_serial->X_generate_set_position_command(
+            address, positionDegrees, kPosSpeed);
+        this->control_serial->send_command();
+        this->control_serial->thread_unlock();
+    }
+
+    /// @brief 上下电机位置控制 (绝对角度), setPosition 的薄封装
+    void setVerticalPosition(float positionDegrees) {
+        setPosition(kVerticalAddr, positionDegrees);
+    }
+
+    /// @brief 角度电机位置控制 (绝对角度), setPosition 的薄封装
+    /// @note  供 PRE_CATCH 预备摆位使用 (角度电机平时是 PID 速度控制)
+    void setAnglePosition(float positionDegrees) {
+        setPosition(kAngleAddr, positionDegrees);
+    }
+
+    /**
+     * @brief 读取上下电机当前绝对位置 (位置反馈)
+     * @param currentDegrees [out] 当前角度 (度), 相对上电零点
+     * @return true=读取成功, false=读取失败
+     * @note  先发问询命令, 等电机回复再读响应; 失败时 currentDegrees 不变
+     * @note  ask 与 read 之间必须留出往返时间: 115200 下电机收到问询、处理、
+     *        回 8 字节的往返通常 > 1ms, 而 X_read_current_position 的首字节
+     *        等待仅 CONTROLSERIAL_RECEIVE_WAIT_TIME(1ms), 不延迟会在电机回复前
+     *        就超时返回 false, 导致到位判定几乎永远收不到位置。
+     */
+    bool readVerticalPosition(float& currentDegrees) {
+        this->control_serial->thread_lock();
+        this->control_serial->ask_current_position(kVerticalAddr);
+        delay(kPositionReadDelayMs);  // 等电机把响应放进硬件接收缓冲
+        bool ok = this->control_serial->X_read_current_position(currentDegrees);
+        this->control_serial->thread_unlock();
+        return ok;
     }
 
     /**

@@ -107,9 +107,10 @@ void applyChassisCommand(const InputState& input) {
 ///        - A 键(阶段1): 请求误差1, 握手后记录一个物料颜色入队, 跑完整升降序列。每按一次记一个。
 ///        - X 键(阶段2): 请求误差2, 按队列 FIFO 逐个颜色自动跑完所有升降序列。
 ///        - B 键: 中止当前运行, 复位为 IDLE (队列保留)。
-///        上升沿触发, 序列自锁运行; A/X/B 的边沿检测与队列逻辑封装在 ArmSequence。
+///        - L1 键(阶段1前置): 空闲时角度电机预备摆位 (PRE_CATCH), 再按 A 进对准。
+///        上升沿触发, 序列自锁运行; A/X/B/L1 的边沿检测与队列逻辑封装在 ArmSequence。
 void applyArmCommand(const InputState& input) {
-    g_arm_sequence->update(input.buttons.a, input.buttons.x, input.buttons.b);
+    g_arm_sequence->update(input.buttons.a, input.buttons.x, input.buttons.b, input.buttons.l1);
 }
 
 }  // namespace
@@ -210,7 +211,7 @@ void loop() {
     if (input.hasFreshData) {
         g_last_fresh_input_ms = input.timestampMs;
         applyChassisCommand(input);   // 更新底盘速度
-        delay(5);  // 底盘指令下发后短暂延迟, 确保 Serial2 总线有时间处理指令, 再下发机械臂指令
+        delay(2);  // 底盘指令下发后短暂延迟, 确保 Serial2 总线有时间处理指令, 再下发机械臂指令
         applyArmCommand(input);       // 更新机械臂控制 (视觉伺服 + 上下序列)
     } else if ((!g_is_stopped || g_arm_sequence->isActive()) &&
                (input.timestampMs - g_last_fresh_input_ms) > kFreshDataGraceMs) {
