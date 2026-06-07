@@ -27,11 +27,12 @@
 ## 位置控制（绝对角度）
 - `setPosition(address, deg)` — 通用位置控制，`X_generate_set_position_command`(0xFD) **原样下发不取负**
     - 方向交给调用方：正角度→一个方向，负角度→反方向；速度 `kPosSpeed`
-- `setVerticalPosition(deg)` — `setPosition(kVerticalAddr, deg)` 薄封装
-- `setAnglePosition(deg)` — `setPosition(kAngleAddr, deg)` 薄封装（PRE_CATCH 预备摆位用）
-- `readVerticalPosition(out)` — 问询 → 延迟 `kPositionReadDelayMs` 等回复 → 读响应；全程持锁为原子事务
+- `setVerticalPosition(deg)` / `setAnglePosition(deg)` / `setForwardPosition(deg)` — 三电机薄封装
+    - [ ! ] 角度/前后电机平时 PID 速度控制；位置封装供 PRE_CATCH 摆位、阶段1 收臂归位用
+- `readPosition(address, out)` — 通用位置读取：问询 → 延迟 `kPositionReadDelayMs` 等回复 → 读响应；全程持锁为原子事务
+    - `readVerticalPosition` / `readAnglePosition` / `readForwardPosition` — 三电机薄封装
     - 返回 true=成功；false=超时/校验失败，out 不变
-    - [ ! ] 问询后必须留往返时间，否则在电机回复前就超时返回 false
+    - [ ! ] 被读电机驱动器"响应"须开启（0x36 问询/响应）；问询后必须留往返时间，否则提前超时返回 false
 - `manualVertical(rpm)` — 上下电机速度模式单发（备用，当前序列不再使用）
 
 ## 夹爪舵机

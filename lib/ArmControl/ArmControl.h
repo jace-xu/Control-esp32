@@ -270,23 +270,43 @@ public:
         setPosition(kAngleAddr, positionDegrees);
     }
 
+    /// @brief 前后电机位置控制 (绝对角度), setPosition 的薄封装
+    /// @note  供阶段1 收臂归位使用 (前后电机平时是 PID 速度控制)
+    void setForwardPosition(float positionDegrees) {
+        setPosition(kForwardAddr, positionDegrees);
+    }
+
     /**
-     * @brief 读取上下电机当前绝对位置 (位置反馈)
-     * @param currentDegrees [out] 当前角度 (度), 相对上电零点
-     * @return true=读取成功, false=读取失败
-     * @note  先发问询命令, 等电机回复再读响应; 失败时 currentDegrees 不变
-     * @note  ask 与 read 之间必须留出往返时间: 115200 下电机收到问询、处理、
-     *        回 8 字节的往返通常 > 1ms, 而 X_read_current_position 的首字节
-     *        等待仅 CONTROLSERIAL_RECEIVE_WAIT_TIME(1ms), 不延迟会在电机回复前
-     *        就超时返回 false, 导致到位判定几乎永远收不到位置。
+     * @brief 通用电机当前绝对位置读取 (位置反馈)
+     * @param address      目标电机总线地址 (kAngleAddr / kVerticalAddr / kForwardAddr)
+     * @param currentDegrees [out] 当前角度 (度), 相对上电零点; 失败时不变
+     * @return true=读取成功, false=超时/校验失败
+     * @note  先发问询命令, 延迟 kPositionReadDelayMs 等电机回复再读响应; 全程持锁为原子事务,
+     *        防延迟期间其他线程命令插入/把响应读走。
+     * @note  [ ! ] 被读电机的驱动器"响应"须开启 (0x36 问询/响应协议), 否则读不到。
      */
-    bool readVerticalPosition(float& currentDegrees) {
+    bool readPosition(int address, float& currentDegrees) {
         this->control_serial->thread_lock();
-        this->control_serial->ask_current_position(kVerticalAddr);
+        this->control_serial->ask_current_position(address);
         delay(kPositionReadDelayMs);  // 等电机把响应放进硬件接收缓冲
         bool ok = this->control_serial->X_read_current_position(currentDegrees);
         this->control_serial->thread_unlock();
         return ok;
+    }
+
+    /// @brief 读上下电机当前位置 (readPosition 薄封装)
+    bool readVerticalPosition(float& currentDegrees) {
+        return readPosition(kVerticalAddr, currentDegrees);
+    }
+
+    /// @brief 读角度电机当前位置 (readPosition 薄封装)
+    bool readAnglePosition(float& currentDegrees) {
+        return readPosition(kAngleAddr, currentDegrees);
+    }
+
+    /// @brief 读前后电机当前位置 (readPosition 薄封装)
+    bool readForwardPosition(float& currentDegrees) {
+        return readPosition(kForwardAddr, currentDegrees);
     }
 
     /**

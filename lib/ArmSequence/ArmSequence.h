@@ -2,6 +2,8 @@
 #include <Arduino.h>
 #include <ArmControl.h>
 #include <VisionSerial.h>
+#include <VisionStreamHandshake.h>
+#include <ColorQueue.h>
 
 /**
  * @brief 机械臂高层任务编排: 视觉伺服 + 上下电机自动序列
@@ -17,18 +19,23 @@ private:
     // 上下电机状态机 (两阶段统一位置控制)
     // 阶段1 (A键夹取, MODE_RECORD):
     //   [PRE_CATCH(L1预备摆位)] → PRE_ALIGN(先降一小段+PID对准,等A确认)
-    //   → DESCENDING(位置下降到夹取位) → GRIPPING(舵机夹取+settle) → ASCENDING(位置回升) → IDLE
+    //   → DESCENDING(位置下降到夹取位) → GRIPPING(舵机夹取+settle)
+    //   → STOW_LIFT_FORWARD(上下+前后归位) → STOW_ANGLE(角度归位) → STOW_DESCEND(上下再降)
+    //   → release放料 → IDLE
     // 阶段2 (X键放置, MODE_CONSUME):
     //   PRE_ALIGN(先降一小段+PID对准,等X确认) → DESCENDING(位置下降到放置位)
     //   → GRIPPING(release放料+等待) → ASCENDING(位置回升) → IDLE (队列非空则跑下一色)
     // ========================================================================
     enum VerticalState {
-        IDLE,         // 空闲: 机械臂未在执行上下动作
-        PRE_CATCH,    // [阶段1 前置] 预备摆位: 按 L1 后角度电机转到 kPreCatchAngleDeg, 等按 A 进 PRE_ALIGN
-        PRE_ALIGN,    // 对准等待: 上下已先降一小段, 角度+前后跑PID对准, 等确认键 (阶段1=A, 阶段2=X)
-        DESCENDING,   // 下降中: 两阶段均位置控制 (阶段1→夹取位, 阶段2→放置位)
-        GRIPPING,     // 底部动作: 阶段1=舵机夹取+settle; 阶段2=release放料+等待
-        ASCENDING,    // 回升中: 两阶段均位置控制
+        IDLE,              // 空闲: 机械臂未在执行上下动作
+        PRE_CATCH,         // [阶段1 前置] 预备摆位: 按 L1 后角度电机转到 kPreCatchAngleDeg, 等按 A
+        PRE_ALIGN,         // 对准等待: 上下已先降一小段, 角度+前后跑PID对准, 等确认键 (阶段1=A, 阶段2=X)
+        DESCENDING,        // 下降中: 两阶段均位置控制 (阶段1→夹取位, 阶段2→放置位)
+        GRIPPING,          // 底部动作: 阶段1=舵机夹取+settle; 阶段2=release放料+等待
+        STOW_LIFT_FORWARD, // [阶段1 收臂] 步骤1: 上下+前后电机同时归位, 轮询两轴到位
+        STOW_ANGLE,        // [阶段1 收臂] 步骤2: 角度电机归位, 轮询到位
+        STOW_DESCEND,      // [阶段1 收臂] 步骤3: 上下电机再下降, 到位后 release 放料
+        ASCENDING,         // [阶段2] 回升中: 位置控制
     };
 
     // ========================================================================
@@ -51,20 +58,22 @@ private:
     static constexpr float kRotationDirection = 1.0f;  // 旋转方向因子: 正=逆时针, 负=顺时针
 
     static constexpr float kDescendTargetRotations = 5.0f*kVerticalDirection;  // 阶段1 下降到夹取位: 5 圈
-    static constexpr float kAscendTargetRotations = 1.0f*kVerticalDirection;   // 阶段1 回升目标: 1 圈
     static constexpr uint32_t kGripDelayMs = 5000;           // 底部放置等待时间: 5 秒
 
     // 阶段2 放置位置目标 (与阶段1 夹取位区分; 圈数带符号同 kVerticalDirection 约定)
     static constexpr float kPlaceDescendRotations = 5.0f*kVerticalDirection;   // 阶段2 下降到放置位: 5 圈
     static constexpr float kPlaceAscendRotations = 1.0f*kVerticalDirection;    // 阶段2 放置后回升: 1 圈
 
+    // 阶段1 夹取后收臂归位目标 (占位, 现场校准; 圈数带符号同方向因子约定)
+    // 序列: 步骤1 上下+前后同走 → 步骤2 角度归位 → 步骤3 上下再降 → release 放料
+    static constexpr float kStowLiftRotations = 1.0f*kVerticalDirection;   // 步骤1 上下电机归位圈数 (越近零点越高)
+    static constexpr float kStowForwardDeg = 0.0f;                          // 步骤1 前后电机归位绝对角 (占位)
+    static constexpr float kStowAngleDeg = 0.0f;                            // 步骤2 角度电机归位绝对角 (占位)
+    static constexpr float kFinalDescendRotations = 3.0f*kVerticalDirection;// 步骤3 上下电机再下降圈数 (放料高度)
+
     // 超时保护 (位置反馈失败/电机卡死时强制停止; 阶段1、阶段2 共用)
     static constexpr uint32_t kDescentTimeoutMs = 15000; // 下降超时保护: 15 秒
     static constexpr uint32_t kAscentTimeoutMs = 12000;  // 回升超时保护: 12 秒
-
-    // 视觉串流握手重传参数: START 命令可能被干扰丢失, 在收到首帧数据前定时重发
-    static constexpr uint32_t kStartRetryIntervalMs = 300;  // 未收到数据则每 300ms 重发 START
-    static constexpr uint8_t kStartMaxRetries = 10;         // START 最大重传次数 (约 3 秒)
 
     // 阶段1 位置控制新参数
     static constexpr float kPreDescendRotations = 0.5f*kVerticalDirection;    // 第一次按A先降0.5圈 
@@ -86,6 +95,7 @@ private:
     // ========================================================================
     ArmControl* arm = nullptr;        // 机械臂电机控制 (地址 5/6/7)
     VisionSerial* vision = nullptr;   // 视觉数据串口 (接收树莓派误差)
+    VisionStreamHandshake handshake;  // 视觉串流握手会话 (START/STOP + 超时重传)
 
     // ========================================================================
     // 运行时状态
@@ -96,6 +106,8 @@ private:
     uint32_t descent_start_time = 0;        // 下降开始时间戳
     uint32_t ascent_start_time = 0;         // 回升开始时间戳
     float vertical_target_degrees = 0.0f;   // 上下电机最近一次 setVerticalPosition 的目标角度 (用于到位判定)
+    float forward_target_degrees = 0.0f;    // 前后电机收臂归位目标角度 (STOW_LIFT_FORWARD 到位判定)
+    float angle_target_degrees = 0.0f;      // 角度电机收臂归位目标角度 (STOW_ANGLE 到位判定)
     uint8_t converge_count = 0;             // PID 收敛连续入阈帧计数
     bool servo_stopped = false;             // 伺服电机是否已停 (避免非串流期间每帧重发停止命令抢总线)
 
@@ -103,28 +115,11 @@ private:
     bool timeout_warned = false;            // "无有效视觉数据" 警告是否已打印过
     uint32_t last_debug_print = 0;          // 上次打印视觉误差调试信息的时间戳
 
-    // 视觉串流握手标志: 树莓派仅在 ESP32 请求后才发误差数据
-    bool vision_streaming = false;          // 当前是否已请求树莓派发送误差数据
-    bool stream_confirmed = false;          // 是否已收到首帧有效数据 (确认对接成功)
-    uint32_t last_start_sent_time = 0;      // 上次发送 START 命令的时间戳 (用于超时重传)
-    uint8_t start_retry_count = 0;          // START 已重传次数
-    bool start_failed_warned = false;       // 重传耗尽的失败警告是否已打印过
-
-    // 本次串流请求的误差类型与颜色 (重传时需重发同一条命令)
-    uint8_t stream_error_type = 1;          // 1=误差1, 2=误差2(按颜色)
-    uint8_t stream_color = 0;               // 误差2 的目标颜色(1=绿/2=蓝/3=红); 误差1 时为 0
-
     // 任务模式与颜色队列
     SequenceMode mode = MODE_NONE;          // 当前任务模式
     bool color_recorded_this_run = false;   // 本轮(阶段1)是否已记录过颜色, 防止重复入队
 
-    // 颜色队列容量 (阶段1 最多可记录多少个待抓物料)
-    static constexpr uint8_t kColorQueueCapacity = 16;
-
-    uint8_t color_queue[kColorQueueCapacity]; // 颜色环形队列
-    uint8_t queue_head = 0;                 // 队首索引 (出队位置)
-    uint8_t queue_tail = 0;                 // 队尾索引 (入队位置)
-    uint8_t queue_count = 0;                // 队列当前元素个数
+    ColorQueue color_queue;                 // 物料颜色待抓队列 (FIFO 环形, 见 ColorQueue.h)
 
     // 触发边沿检测: A 键(记录) 与 X 键(消费) 各自检测上升沿
     bool prev_a_pressed = false;            // 上一帧 A 键是否按住
@@ -142,13 +137,13 @@ public:
      * @param vision 已初始化的视觉串口对象指针
      */
     ArmSequence(ArmControl* arm, VisionSerial* vision)
-        : arm(arm), vision(vision) {}
+        : arm(arm), vision(vision), handshake(vision) {}
 
     /// @brief 视觉伺服是否正在运行 (供 main 做安全判断)
     bool isActive() const { return active; }
 
     /// @brief 当前颜色队列中待抓物料数量
-    uint8_t queuedColorCount() const { return queue_count; }
+    uint8_t queuedColorCount() const { return color_queue.count(); }
 
     /**
      * @brief 每帧调用的主入口 (两阶段 + 颜色队列模式)
@@ -174,7 +169,9 @@ public:
             // 必须在 stop() 之前做: stop()→haltAndReset() 会把 mode 复位为 MODE_NONE。
             if (mode == MODE_RECORD) {
                 if (color_recorded_this_run) {
-                    dropLastRecordedColor();
+                    color_queue.dropLast();   // 丢弃本轮刚记的颜色 (当作没发生)
+                    Serial.printf("Aborted: dropped recorded color, queue size = %u\n",
+                                  color_queue.count());
                 }
                 if (arm != nullptr) {
                     arm->release();   // 松开夹爪, 丢回可能已夹住的物料
@@ -200,7 +197,7 @@ public:
         // 阶段1: PRE_CATCH 期间按 A → 请求误差1并进入 PRE_ALIGN (不强制等角度电机到位)
         else if (state == PRE_CATCH && aRising) {
             Serial.println("[Stage 1] A-key: leaving pre-catch, entering pre-align");
-            startVisionStream(currentTime, 1, kColorNone);  // 请求误差1
+            handshake.start(1, kColorNone, currentTime);  // 请求误差1
             arm->resetPID();
             enterPreAlign(currentTime);
         }
@@ -222,15 +219,18 @@ public:
 
         // 自锁运行: 序列一旦启动, 不再依赖按键是否按住
         if (active) {
-            if (vision_streaming) {
-                retryStartIfNeeded(currentTime);  // 未收到数据则超时重传 START
+            if (handshake.isStreaming()) {
+                handshake.retryIfNeeded(currentTime);  // 未收到数据则超时重传 START
                 runVisualServo(currentTime);
                 servo_stopped = false;            // 伺服正在运行, 下次进入非串流时需再停一次
-            } else if ((state == DESCENDING || state == ASCENDING) && !servo_stopped) {
-                // 下降/回升期 (非串流, 两阶段统一位置控制) 停一次伺服即可。
+            } else if ((state == DESCENDING || state == ASCENDING ||
+                        state == STOW_LIFT_FORWARD || state == STOW_ANGLE ||
+                        state == STOW_DESCEND) && !servo_stopped) {
+                // 非串流位置控制期 (下降/回升/收臂归位) 停一次伺服即可。
                 // [ ! ] 必须排除 PRE_CATCH/PRE_ALIGN: stopServo() 会给角度电机(地址5)发停止命令,
-                //       会打断 PRE_CATCH 的角度电机位置移动; PRE_ALIGN 靠 vision_streaming 跑伺服不入此分支。
-                // 每帧重发停止命令还会与地址6 的位置问询/响应在同一 Serial2 上交错, 拖慢位置读取。
+                //       会打断 PRE_CATCH 的角度电机位置移动; PRE_ALIGN 靠 handshake.isStreaming() 跑伺服不入此分支。
+                // [ ! ] 收臂 STOW 各步会主动给角度/前后/上下发位置命令, 故此处只在进入时停一次,
+                //       不每帧重发 (每帧重发会与位置问询/响应抢总线)。
                 arm->stopServo();
                 servo_stopped = true;
             }
@@ -249,9 +249,7 @@ public:
 
     /// @brief 清空颜色队列 (供 main 在需要时手动复位任务)
     void clearColorQueue() {
-        queue_head = 0;
-        queue_tail = 0;
-        queue_count = 0;
+        color_queue.clear();
     }
 
 private:
@@ -264,7 +262,7 @@ private:
      * @note  仅停电机, 不动状态机/自锁标志。供"正常跑完后回静止"与"彻底结束"复用。
      */
     void haltMotors() {
-        stopVisionStream();      // 通知树莓派停止发送误差数据
+        handshake.stop();        // 通知树莓派停止发送误差数据
         if (arm != nullptr) {
             arm->stop();         // 停三个电机 (角度/上下/前后) 并复位 PID
         }
@@ -287,45 +285,6 @@ private:
     void haltAndReset() {
         haltMotors();
         resetRunState();
-    }
-
-    // ========================================================================
-    // 颜色队列操作 (FIFO 环形缓冲)
-    // ========================================================================
-
-    /// @brief 颜色入队 (队满则丢弃并打印警告)
-    void enqueueColor(uint8_t color) {
-        if (queue_count >= kColorQueueCapacity) {
-            Serial.println("WARNING: Color queue full, dropping color");
-            return;
-        }
-        color_queue[queue_tail] = color;
-        queue_tail = (queue_tail + 1) % kColorQueueCapacity;
-        queue_count++;
-        Serial.printf("Recorded color %u, queue size = %u\n", color, queue_count);
-    }
-
-    /// @brief 颜色出队 (取队首; 队空返回 false)
-    bool dequeueColor(uint8_t& color) {
-        if (queue_count == 0) {
-            return false;
-        }
-        color = color_queue[queue_head];
-        queue_head = (queue_head + 1) % kColorQueueCapacity;
-        queue_count--;
-        return true;
-    }
-
-    /// @brief 撤销本轮最后一次入队的颜色 (阶段1 中止回滚用)
-    /// @note  FIFO 环形缓冲, 回退队尾指针即可丢弃最新入队的元素。
-    ///        阶段1 每轮至多入队一个且不出队, 故队尾元素必为本轮所记颜色。
-    void dropLastRecordedColor() {
-        if (queue_count == 0) {
-            return;
-        }
-        queue_tail = (queue_tail + kColorQueueCapacity - 1) % kColorQueueCapacity;
-        queue_count--;
-        Serial.printf("Aborted: dropped last recorded color, queue size = %u\n", queue_count);
     }
 
     // ========================================================================
@@ -364,13 +323,13 @@ private:
      */
     void startConsumeStage(uint32_t currentTime) {
         uint8_t color = 0;
-        if (!dequeueColor(color)) {
+        if (!color_queue.dequeue(color)) {
             Serial.println("[Stage 2] Consume: color queue empty, nothing to do");
             return;
         }
         mode = MODE_CONSUME;
         Serial.printf("[Stage 2] Consume: requesting error2 for color %u (%u left)\n",
-                      color, queue_count);
+                      color, color_queue.count());
         beginVerticalSequence(currentTime, 2, color);  // 误差2, 指定颜色
     }
 
@@ -384,7 +343,7 @@ private:
      */
     void beginVerticalSequence(uint32_t currentTime, uint8_t errorType, uint8_t color) {
         active = true;
-        startVisionStream(currentTime, errorType, color);  // 请求串流 (带超时重传)
+        handshake.start(errorType, color, currentTime);  // 请求串流 (带超时重传)
         arm->resetPID();
         // 两阶段统一: 都先降一小段 + 跑 PID 对准, 等确认键 (阶段1=A, 阶段2=X)
         enterPreAlign(currentTime);
@@ -394,7 +353,7 @@ private:
      * @brief 进入 PRE_ALIGN: 上下位置先降一小段, 同时跑角度+前后 PID 对准, 等第二次按 A
      * @param currentTime 当前 millis() 时间戳
      * @note  供两处复用: IDLE+A 直接进阶段1 (beginVerticalSequence), 以及 PRE_CATCH+A 转入。
-     * @note  调用前视觉串流应已请求 (beginVerticalSequence 已调 startVisionStream;
+     * @note  调用前视觉串流应已请求 (beginVerticalSequence 已调 handshake.start;
      *        PRE_CATCH 转入时需自行先请求误差1)。
      */
     void enterPreAlign(uint32_t currentTime) {
@@ -411,12 +370,12 @@ private:
      * @brief PRE_ALIGN 确认 → 停视觉伺服 + 位置下降到目标 (按 mode 选夹取位/放置位)
      * @param currentTime 当前 millis() 时间戳
      * @note  阶段1 下降到夹取位 kDescendTargetRotations; 阶段2 下降到放置位 kPlaceDescendRotations。
-     *        下降期 vision_streaming=false, 仅地址6 位置轮询, 无伺服抢总线。
+     *        下降期 handshake 已 stop (仅地址6 位置轮询, 无伺服抢总线)。
      */
     void confirmAlignAndDescend(uint32_t currentTime) {
         const char* tag = (mode == MODE_RECORD) ? "[Stage 1]" : "[Stage 2]";
         Serial.printf("%s confirm: aligned, descending to target position\n", tag);
-        stopVisionStream();       // 下降期间停视觉伺服
+        handshake.stop();         // 下降期间停视觉伺服
         arm->stopServo();
         float rotations = (mode == MODE_RECORD) ? kDescendTargetRotations : kPlaceDescendRotations;
         float targetDeg = rotations * 360.0f;  // 符号已在常量里 (正=下降)
@@ -438,9 +397,9 @@ private:
 
         if (mode == MODE_CONSUME) {
             uint8_t color = 0;
-            if (dequeueColor(color)) {
+            if (color_queue.dequeue(color)) {
                 // 队列还有物料: 直接启动下一个颜色的序列 (自锁继续)
-                Serial.printf("[Stage 2] Next color %u (%u left)\n", color, queue_count);
+                Serial.printf("[Stage 2] Next color %u (%u left)\n", color, color_queue.count());
                 beginVerticalSequence(currentTime, 2, color);
                 return;
             }
@@ -456,70 +415,6 @@ private:
         resetRunState();
     }
 
-    /// @brief 请求树莓派开始发送视觉误差数据 (幂等: 已在串流则不重发)
-    /// @param currentTime 当前 millis() 时间戳, 用于初始化重传计时
-    /// @param errorType   误差类型: 1=误差1, 2=误差2(按颜色)
-    /// @param color       误差2 的目标颜色(1=绿/2=蓝/3=红); 误差1 传 0
-    void startVisionStream(uint32_t currentTime, uint8_t errorType, uint8_t color) {
-        if (!vision_streaming) {
-            stream_error_type = errorType;
-            stream_color = color;
-            vision_streaming = true;
-            stream_confirmed = false;       // 等待首帧数据确认对接
-            last_start_sent_time = currentTime;
-            start_retry_count = 0;
-            start_failed_warned = false;
-            sendStartCommand();
-        }
-    }
-
-    /// @brief 按当前 stream_error_type/stream_color 发送对应的 START 命令
-    void sendStartCommand() {
-        if (stream_error_type == 2) {
-            vision->requestStart2(stream_color);
-        } else {
-            vision->requestStart1();
-        }
-    }
-
-    /// @brief 通知树莓派停止发送视觉误差数据 (幂等: 未串流则不重发)
-    void stopVisionStream() {
-        if (vision_streaming) {
-            vision->requestStop();
-            vision_streaming = false;
-            stream_confirmed = false;
-        }
-    }
-
-    /**
-     * @brief START 命令超时重传检查
-     * @param currentTime 当前 millis() 时间戳
-     * @details 已请求串流但尚未收到首帧数据时, 每隔 kStartRetryIntervalMs 重发一次
-     *          START, 防止握手帧被干扰丢失导致树莓派始终不发数据。收到首帧后
-     *          (stream_confirmed=true) 停止重传; 超过最大次数后放弃并打印一次警告。
-     * @note  边降边对准模式: 重传耗尽不中止序列, 机械臂继续按时间序列动作 (可能盲抓),
-     *        仅打印警告提示握手失败。
-     */
-    void retryStartIfNeeded(uint32_t currentTime) {
-        if (!vision_streaming || stream_confirmed) {
-            return;  // 未串流, 或已确认对接, 无需重传
-        }
-        if (start_retry_count >= kStartMaxRetries) {
-            if (!start_failed_warned) {
-                Serial.println("ERROR: Vision handshake failed after max retries, running blind!");
-                start_failed_warned = true;
-            }
-            return;  // 已达重传上限, 放弃重传
-        }
-        if ((currentTime - last_start_sent_time) >= kStartRetryIntervalMs) {
-            sendStartCommand();
-            last_start_sent_time = currentTime;
-            start_retry_count++;
-            Serial.printf("Vision handshake: resending START (retry %u/%u)\n",
-                          start_retry_count, kStartMaxRetries);
-        }
-    }
-
     /**
      * @brief 视觉伺服: 角度 + 前后 PID 闭环控制
      * @param currentTime 当前 millis() 时间戳
@@ -531,16 +426,21 @@ private:
         // 仅接受与本次请求误差类型匹配的帧 (id1: 1=误差1, 2=误差2)。
         // 切换串流 (STOP→START) 的瞬间, 接收缓冲里可能残留上一类型的旧帧,
         // 若不校验会导致: 提前误判握手成功、记错颜色、用旧误差驱动 PID。
-        bool frameMatches = visionError.valid && (visionError.id1 == stream_error_type);
+        bool frameMatches = visionError.valid && (visionError.id1 == handshake.expectedErrorType());
 
         if (frameMatches) {
             // 类型匹配: 确认握手成功 (停止 START 重传), 清除超时警告, 执行 PID 伺服
-            stream_confirmed = true;
+            handshake.confirm();
             timeout_warned = false;
 
             // 阶段1: 握手成功后记录本轮第一个颜色入队 (每轮只记一个)
             if (mode == MODE_RECORD && !color_recorded_this_run) {
-                enqueueColor(visionError.id2);
+                if (color_queue.enqueue(visionError.id2)) {
+                    Serial.printf("Recorded color %u, queue size = %u\n",
+                                  visionError.id2, color_queue.count());
+                } else {
+                    Serial.println("WARNING: Color queue full, dropping color");
+                }
                 color_recorded_this_run = true;
             }
 
@@ -648,24 +548,94 @@ private:
                 break;
             }
 
-            // ---- GRIPPING: 阶段1=夹取settle后回升; 阶段2=放置等待后回升 ----
+            // ---- GRIPPING: 阶段1=夹取settle后进收臂归位; 阶段2=放置等待后回升 ----
             case GRIPPING: {
-                // 阶段1 等舵机夹紧 settle, 阶段2 等放置稳定; 时间到则位置回升
+                // 阶段1 等舵机夹紧 settle, 阶段2 等放置稳定
                 uint32_t waitMs = (mode == MODE_RECORD) ? kGripSettleMs : kGripDelayMs;
                 if ((currentTime - grip_start_time) >= waitMs) {
-                    float rotations = (mode == MODE_RECORD) ? kAscendTargetRotations
-                                                            : kPlaceAscendRotations;
-                    float ascendTargetDeg = rotations * 360.0f;  // 符号已在常量里 (正=下降)
-                    Serial.printf("Wait done (%lums), ascending to %.1f deg\n", waitMs, ascendTargetDeg);
-                    vertical_target_degrees = ascendTargetDeg;
-                    arm->setVerticalPosition(ascendTargetDeg);
-                    state = ASCENDING;
-                    ascent_start_time = currentTime;
+                    if (mode == MODE_RECORD) {
+                        // 阶段1 收臂步骤1: 上下电机 + 前后电机同时归位
+                        float vDeg = kStowLiftRotations * 360.0f;
+                        vertical_target_degrees = vDeg;
+                        forward_target_degrees = kStowForwardDeg;
+                        Serial.printf("Grip done (%lums), stow step1: vertical→%.1f, forward→%.1f\n",
+                                      waitMs, vDeg, kStowForwardDeg);
+                        arm->setVerticalPosition(vDeg);
+                        arm->setForwardPosition(kStowForwardDeg);
+                        state = STOW_LIFT_FORWARD;
+                        ascent_start_time = currentTime;
+                    } else {
+                        // 阶段2: 位置回升 (放料已在 DESCENDING 到位时完成)
+                        float ascendTargetDeg = kPlaceAscendRotations * 360.0f;
+                        Serial.printf("Place wait done (%lums), ascending to %.1f deg\n", waitMs, ascendTargetDeg);
+                        vertical_target_degrees = ascendTargetDeg;
+                        arm->setVerticalPosition(ascendTargetDeg);
+                        state = ASCENDING;
+                        ascent_start_time = currentTime;
+                    }
                 }
                 break;
             }
 
-            // ---- ASCENDING: 两阶段统一位置控制, 位置反馈轮询到位 ----
+            // ---- STOW_LIFT_FORWARD (阶段1 收臂步骤1): 上下+前后同时归位, 两轴都到位才进下一步 ----
+            case STOW_LIFT_FORWARD: {
+                float vPos = 0.0f, fPos = 0.0f;
+                bool vArrived = arm->readVerticalPosition(vPos) &&
+                                fabsf(vPos - vertical_target_degrees) <= kPositionArrivedThreshDeg;
+                bool fArrived = arm->readForwardPosition(fPos) &&
+                                fabsf(fPos - forward_target_degrees) <= kPositionArrivedThreshDeg;
+                if (vArrived && fArrived) {
+                    Serial.println("Stow step1 done, stow step2: angle homing");
+                    angle_target_degrees = kStowAngleDeg;
+                    arm->setAnglePosition(kStowAngleDeg);
+                    state = STOW_ANGLE;
+                    ascent_start_time = currentTime;
+                }
+                if ((currentTime - ascent_start_time) > kAscentTimeoutMs) {
+                    Serial.println("ERROR: Stow step1 timeout! Stopping.");
+                    haltAndReset();
+                }
+                break;
+            }
+
+            // ---- STOW_ANGLE (阶段1 收臂步骤2): 角度电机归位, 到位进下一步 ----
+            case STOW_ANGLE: {
+                float aPos = 0.0f;
+                if (arm->readAnglePosition(aPos)) {
+                    if (fabsf(aPos - angle_target_degrees) <= kPositionArrivedThreshDeg) {
+                        float vDeg = kFinalDescendRotations * 360.0f;
+                        Serial.printf("Stow step2 done, stow step3: vertical descend→%.1f\n", vDeg);
+                        vertical_target_degrees = vDeg;
+                        arm->setVerticalPosition(vDeg);
+                        state = STOW_DESCEND;
+                        descent_start_time = currentTime;
+                    }
+                }
+                if ((currentTime - ascent_start_time) > kAscentTimeoutMs) {
+                    Serial.println("ERROR: Stow step2 (angle) timeout! Stopping.");
+                    haltAndReset();
+                }
+                break;
+            }
+
+            // ---- STOW_DESCEND (阶段1 收臂步骤3): 上下再降到位 → release 放料 → 结束 ----
+            case STOW_DESCEND: {
+                float vPos = 0.0f;
+                if (arm->readVerticalPosition(vPos)) {
+                    if (fabsf(vPos - vertical_target_degrees) <= kPositionArrivedThreshDeg) {
+                        Serial.printf("Stow step3 done (pos=%.1f), releasing\n", vPos);
+                        arm->release();   // 收臂到位, 松爪放下物料
+                        finishRun(currentTime);
+                    }
+                }
+                if ((currentTime - descent_start_time) > kDescentTimeoutMs) {
+                    Serial.println("ERROR: Stow step3 (descend) timeout! Stopping.");
+                    haltAndReset();
+                }
+                break;
+            }
+
+            // ---- ASCENDING (仅阶段2): 位置控制回升, 位置反馈轮询到位 ----
             case ASCENDING: {
                 float currentPos = 0.0f;
                 if (arm->readVerticalPosition(currentPos)) {

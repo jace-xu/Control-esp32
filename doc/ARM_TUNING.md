@@ -68,11 +68,16 @@
 | `kPreCatchAngleDeg` | 10°×方向 | [必校] | PRE_CATCH 角度电机预备摆位绝对角，实测预备位 |
 | `kPreDescendRotations` | 0.5 圈 | [可调] | 对准期先降的圈数（两阶段共用） |
 | `kDescendTargetRotations` | 5 圈 | [必校] | 阶段1 下降到**夹取位**的圈数，按抓取高度定 |
-| `kAscendTargetRotations` | 1 圈 | [必校] | 阶段1 夹取后回升圈数（越接近 0 越高） |
+| `kStowLiftRotations` | 1 圈 | [必校] | 阶段1 收臂步骤1 上下电机归位圈数（越接近 0 越高） |
+| `kStowForwardDeg` | 0° | [必校] | 阶段1 收臂步骤1 前后电机归位绝对角 |
+| `kStowAngleDeg` | 0° | [必校] | 阶段1 收臂步骤2 角度电机归位绝对角 |
+| `kFinalDescendRotations` | 3 圈 | [必校] | 阶段1 收臂步骤3 上下电机再下降圈数（放料高度） |
 | `kPlaceDescendRotations` | 5 圈 | [必校] | 阶段2 下降到**放置位**的圈数，按放置高度定 |
 | `kPlaceAscendRotations` | 1 圈 | [必校] | 阶段2 放置后回升圈数 |
 | `kPositionArrivedThreshDeg` | 5° | [可调] | 位置到位判定阈值（电机角度）；太小可能判不到位 |
 | `kPositionReadDelayMs`（ArmControl） | 2ms | [可调] | 位置问询后等电机回复的时间；太小读不到位置（返回 false） |
+
+> [ ! ] 阶段1 收臂归位（STOW）的轮询到位依赖角度(5)/前后(7)电机能读位置 → 其驱动器"响应"须开启。
 
 ## 6. 视觉伺服 PID（`src/main.cpp` 启动时下发；增益在像素尺度）
 

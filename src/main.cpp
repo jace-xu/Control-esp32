@@ -2,6 +2,8 @@
 #include <BottomControl.h>
 #include <ArmControl.h>
 #include <ArmSequence.h>
+#include <TrayControl.h>
+#include <TaskCoordinator.h>
 #include <VisionSerial.h>
 #include <GamepadInput.h>
 
@@ -45,6 +47,8 @@ BottomControl* g_bottom_control = nullptr;   // 底盘控制 (地址 1~4: 四个
 ArmControl* g_arm_control = nullptr;         // 机械臂控制 (地址 5:角度, 6:上下, 7:前后)
 VisionSerial* g_vision_serial = nullptr;     // 视觉数据串口 (Serial1, 接收树莓派误差数据)
 ArmSequence* g_arm_sequence = nullptr;       // 机械臂任务编排 (视觉伺服 + 上下序列状态机)
+TrayControl* g_tray_control = nullptr;       // 物料盘控制 (骨架, 动作待补)
+TaskCoordinator* g_task_coordinator = nullptr; // 上层协调器 (机械臂 + 物料盘; 当前透传)
 
 // ============================================================================
 // 全局状态标志
@@ -67,9 +71,11 @@ void stopChassis() {
 }
 
 /// @brief 停止机械臂所有电机并复位状态机
-/// @note 委托给 ArmSequence, 同时停止角度/上下/前后三个电机并复位状态机为空闲
+/// @note 委托给协调器 (机械臂 + 未来物料盘); 协调器未就绪时回退到 ArmSequence
 void stopArm() {
-    if (g_arm_sequence != nullptr) {
+    if (g_task_coordinator != nullptr) {
+        g_task_coordinator->stop();
+    } else if (g_arm_sequence != nullptr) {
         g_arm_sequence->stop();
     }
 }
@@ -110,7 +116,7 @@ void applyChassisCommand(const InputState& input) {
 ///        - L1 键(阶段1前置): 空闲时角度电机预备摆位 (PRE_CATCH), 再按 A 进对准。
 ///        上升沿触发, 序列自锁运行; A/X/B/L1 的边沿检测与队列逻辑封装在 ArmSequence。
 void applyArmCommand(const InputState& input) {
-    g_arm_sequence->update(input.buttons.a, input.buttons.x, input.buttons.b, input.buttons.l1);
+    g_task_coordinator->update(input.buttons.a, input.buttons.x, input.buttons.b, input.buttons.l1);
 }
 
 }  // namespace
@@ -148,6 +154,12 @@ void setup() {
     // 初始化机械臂任务编排 (依赖 ArmControl 与 VisionSerial, 须在二者之后创建)
     g_arm_sequence = new ArmSequence(g_arm_control, g_vision_serial);
 
+    // 初始化物料盘控制 (骨架; 与底盘/机械臂共用 Serial2 总线)
+    g_tray_control = new TrayControl();
+
+    // 初始化上层协调器 (依赖 ArmSequence 与 TrayControl, 须在二者之后创建)
+    g_task_coordinator = new TaskCoordinator(g_arm_sequence, g_tray_control);
+
     // ---- 初始化 Bluepad32 蓝牙手柄输入层 ----
     GamepadInput::begin();
 
@@ -177,7 +189,7 @@ void loop() {
     // ---- 情况 1: 无可用手柄 ----
     // 没有手柄连接时, 底盘和机械臂必须保持停止, 不允许任何运动
     if (!input.connected) {
-        if (!g_is_stopped || g_arm_sequence->isActive()) {
+        if (!g_is_stopped || g_task_coordinator->isActive()) {
             safetyStopAll();
             Serial.println("No active controller, chassis and arm stopped");
         }
@@ -190,7 +202,7 @@ void loop() {
     // 手柄物理连接正常, 但超过 250ms 没有收到新数据包 (蓝牙断流),
     // 此时也必须停止所有运动, 避免执行机构在通信中断期间继续执行过时指令
     if (input.timedOut) {
-        if (!g_is_stopped || g_arm_sequence->isActive()) {
+        if (!g_is_stopped || g_task_coordinator->isActive()) {
             safetyStopAll();
         }
         if (!g_timeout_reported) {
@@ -213,7 +225,7 @@ void loop() {
         applyChassisCommand(input);   // 更新底盘速度
         delay(2);  // 底盘指令下发后短暂延迟, 确保 Serial2 总线有时间处理指令, 再下发机械臂指令
         applyArmCommand(input);       // 更新机械臂控制 (视觉伺服 + 上下序列)
-    } else if ((!g_is_stopped || g_arm_sequence->isActive()) &&
+    } else if ((!g_is_stopped || g_task_coordinator->isActive()) &&
                (input.timestampMs - g_last_fresh_input_ms) > kFreshDataGraceMs) {
         // 超过宽限期仍无新数据: 同时停止底盘和机械臂
         safetyStopAll();
