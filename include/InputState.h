@@ -53,4 +53,5 @@ struct InputState {
     ButtonState buttons;
     ChassisCommand chassis;
     ArmCommand arm;
+    bool armServoTrigger = false;      // True when visual servo button is held
 };

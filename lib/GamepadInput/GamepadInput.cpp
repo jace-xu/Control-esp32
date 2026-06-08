@@ -18,13 +18,15 @@ constexpr uint8_t kAllowedControllerBtAddr[6] = {0x40, 0xE4, 0x04, 0x18, 0x5F, 0
 uint32_t g_lastControllerDataMs = 0;
 
 float normalizeAxis(int raw) {
+    // 对称钳位到 [-511, 511] 并除以 511,使正负向都能达到 ±1.0。
+    // (摇杆原始范围约为 [-512, 511],直接除以 512 会导致正向最大仅 0.998、负向 -1.0 的不对称)
     if (raw > 511) {
         raw = 511;
-    } else if (raw < -512) {
-        raw = -512;
+    } else if (raw < -511) {
+        raw = -511;
     }
 
-    const float normalized = static_cast<float>(raw) / 512.0f;
+    const float normalized = static_cast<float>(raw) / 511.0f;
     if (fabsf(normalized) < kDeadzone) {
         return 0.0f;
     }
@@ -139,6 +141,10 @@ void fillChassisCommand(InputState& state) {
 }
 
 void fillArmCommand(InputState& state) {
+    // Visual servo trigger: A button held
+    state.armServoTrigger = state.buttons.a;
+
+    // Reserved arm command fields (not used in visual servo mode)
     state.arm.joint1 = 0.0f;
     state.arm.joint2 = 0.0f;
     state.arm.joint3 = 0.0f;
