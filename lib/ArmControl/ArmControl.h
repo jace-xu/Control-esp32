@@ -2,6 +2,8 @@
 #include <ControlSerial.h>
 #include <Arduino.h>
 #include <cmath>
+#include <VisionSerial.h>
+#include <VisionStreamHandshake.h>
 
 /**
  * @brief Arm control class for visual servoing and manual control
@@ -9,7 +11,9 @@
  * @note Addresses 5-7 share the same Serial2 bus with chassis motors (addresses 1-4)
  * @note 夹爪由 ESP32 LEDC PWM 驱动一个舵机 (grip/release 到固定角度)
  * @note [ ! ] Only can be created once in the whole program
- * @note == Version 2.0.0 ==
+ * @note 集成视觉对准: 持有 VisionStreamHandshake, 提供角度+前后 PID 闭环对准 +
+ *       串流握手 + 收敛判定 (beginAlign / updateAlign / isAligned), 供上层序列复用。
+ * @note == Version 3.0.0 ==
  */
 class ArmControl {
 private:
@@ -31,6 +35,20 @@ private:
     static constexpr float kGripperMaxPulseUs = 2500.0f;
 
     ControlSerial* control_serial = nullptr;  // 共用的 Serial2 命令通道 (单例)
+
+    // ---- 视觉对准 (集成) ----
+    VisionSerial* vision = nullptr;       // 视觉数据串口 (接收树莓派误差; 不拥有生命周期)
+    VisionStreamHandshake* handshake = nullptr;  // 视觉串流握手会话 (START/STOP + 超时重传)
+
+    // PID 收敛判定 (对准完成后才算"已对准")
+    static constexpr uint8_t kConvergeFramesNeeded = 10;   // 连续入阈帧数 (50Hz ≈ 0.2s)
+    static constexpr float kConvergeAngleThresh = 8.0f;    // 角度轴误差收敛阈值 (像素)
+    static constexpr float kConvergeForwardThresh = 8.0f;  // 前后轴误差收敛阈值 (像素)
+
+    uint8_t converge_count = 0;       // PID 收敛连续入阈帧计数
+    bool timeout_warned = false;      // "无有效视觉数据" 警告是否已打印过
+    uint32_t last_debug_print = 0;    // 上次打印视觉误差调试信息的时间戳
+    bool count_convergence = true;    // 是否在本次会话累计收敛 (对准期 true)
 
 
     // PID controller parameters (tunable)
@@ -64,17 +82,29 @@ private:
     static constexpr uint32_t kPositionReadDelayMs = 2;
 
 public:
+public:
+    /// @brief 视觉对准一帧的结果, 供上层序列按阶段语义处理
+    struct AlignFrame {
+        bool freshFrame = false;  // 本帧是否收到与请求类型匹配的新鲜视觉帧
+        uint8_t color = 0;        // 新鲜帧携带的物块颜色 (id2); freshFrame=false 时无意义
+        bool converged = false;   // 当前是否已连续收敛达标 (可确认下一步)
+    };
+
     // Disabled copying and assignment
     ArmControl(const ArmControl&) = delete;
     ArmControl& operator=(const ArmControl&) = delete;
 
     /**
      * @brief Create arm control object
+     * @param vision 已初始化的视觉串口指针 (用于视觉对准; 不拥有其生命周期)
      * @note Motors share the single Serial2 bus via ControlSerial::get_instance()
      * @note 同时初始化夹爪舵机的 LEDC PWM, 上电默认松开
+     * @note 内部 new 一个 VisionStreamHandshake (持有 vision 指针), 析构时 delete
      */
-    ArmControl() {
+    explicit ArmControl(VisionSerial* vision) {
         this->control_serial = &(ControlSerial::get_instance());
+        this->vision = vision;
+        this->handshake = new VisionStreamHandshake(vision);
         // 初始化夹爪舵机 PWM (ESP32 Arduino core 2.x: 通道制 LEDC)
         ledcSetup(kGripperPwmChannel, kGripperPwmFreq, kGripperPwmResBits);
         ledcAttachPin(kGripperPin, kGripperPwmChannel);
@@ -84,6 +114,7 @@ public:
     /// @brief Destruct the object
     ~ArmControl() {
         ledcDetachPin(kGripperPin);
+        delete handshake;
     }
 
 public:
@@ -232,16 +263,6 @@ public:
         this->control_serial->thread_unlock();
     }
 
-    /**
-     * @brief Manual control for vertical motor (speed mode)
-     * @param rpm Rotation speed, positive = up, negative = down
-     */
-    void manualVertical(float rpm) {
-        this->control_serial->thread_lock();
-        this->control_serial->X_generate_set_rotate_speed_command(kVerticalAddr, rpm);
-        this->control_serial->send_command();
-        this->control_serial->thread_unlock();
-    }
 
     /**
      * @brief 通用电机位置控制 (绝对角度, 原样下发不取负)
@@ -252,11 +273,9 @@ public:
      * @note  内部不取负, 设一次即可, 电机内部闭环完成移动
      */
     void setPosition(int address, float positionDegrees) {
-        this->control_serial->thread_lock();
         this->control_serial->X_generate_set_position_command(
             address, positionDegrees, kPosSpeed);
         this->control_serial->send_command();
-        this->control_serial->thread_unlock();
     }
 
     /// @brief 上下电机位置控制 (绝对角度), setPosition 的薄封装
@@ -368,6 +387,97 @@ public:
         forward_error_integral = 0.0f;
         forward_error_last = 0.0f;
         last_update_time = 0;
+    }
+
+    // ========================================================================
+    // 视觉对准 (集成: 角度+前后 PID 闭环对准 + 串流握手 + 收敛判定)
+    // 供上层序列 (阶段1 夹取 / 阶段2 放置) 复用; 只管角度(5)+前后(7), 不碰上下(6)。
+    // ========================================================================
+
+    /**
+     * @brief 开始一次对准会话: 请求串流 + 复位 PID + 清零收敛计数
+     * @param errorType   误差类型: 1=误差1, 2=误差2(按颜色)
+     * @param color       误差2 的目标颜色; 误差1 传 kColorNone
+     * @param currentTime 当前 millis() 时间戳
+     */
+    void beginAlign(uint8_t errorType, uint8_t color, uint32_t currentTime) {
+        handshake->start(errorType, color, currentTime);
+        resetPID();
+        converge_count = 0;
+        timeout_warned = false;
+        count_convergence = true;
+    }
+
+    /// @brief 是否累计收敛 (对准期 true; 转位置控制后调用方置 false)
+    void setCountConvergence(bool on) { count_convergence = on; }
+
+    /// @brief 当前是否已请求串流 (供调用方判断是否进伺服分支)
+    bool isStreaming() const { return handshake->isStreaming(); }
+
+    /// @brief 当前是否已连续收敛达标
+    bool isAligned() const { return converge_count >= kConvergeFramesNeeded; }
+
+    /// @brief 本次串流请求的误差类型 (1/2)
+    uint8_t expectedErrorType() const { return handshake->expectedErrorType(); }
+
+    /// @brief START 命令超时重传检查 (转发握手会话)
+    void retryAlignIfNeeded(uint32_t currentTime) { handshake->retryIfNeeded(currentTime); }
+
+    /// @brief 通知树莓派停止发送误差数据 (转发握手会话)
+    void stopAlignStream() { handshake->stop(); }
+
+    /**
+     * @brief 视觉伺服一帧: 读帧 → 校验类型 → PID 伺服 → 收敛计数
+     * @param currentTime 当前 millis() 时间戳
+     * @return AlignFrame: 本帧是否新鲜 / 颜色 / 是否已收敛
+     * @note  不记色入队、不打印 "[Stage X]" 提示, 交调用方按 AlignFrame 自行处理。
+     */
+    AlignFrame updateAlign(uint32_t currentTime) {
+        AlignFrame result;
+        VisionError visionError = vision->read();
+
+        // 仅接受与本次请求误差类型匹配的帧 (id1: 1=误差1, 2=误差2)。
+        // 切换串流 (STOP→START) 瞬间缓冲可能残留旧帧, 不校验会误判握手/记错色/用旧误差。
+        bool frameMatches = visionError.valid && (visionError.id1 == handshake->expectedErrorType());
+
+        if (frameMatches) {
+            handshake->confirm();   // 类型匹配: 确认握手成功 (停止 START 重传)
+            timeout_warned = false;
+            result.freshFrame = true;
+            result.color = visionError.id2;
+
+            updateVisualServo(visionError.angleError, visionError.forwardError);
+
+            // 收敛判定: 角度与前后误差同时入阈才计数, 任一超阈值则清零。
+            if (count_convergence) {
+                if (fabsf(visionError.angleError) <= kConvergeAngleThresh &&
+                    fabsf(visionError.forwardError) <= kConvergeForwardThresh) {
+                    if (converge_count < kConvergeFramesNeeded) {
+                        converge_count++;
+                    }
+                } else {
+                    converge_count = 0;
+                }
+            }
+
+            // 调试输出: 每 200ms 打印一次视觉误差值
+            if ((currentTime - last_debug_print) > 200) {
+                Serial.printf("Vision: angle=%.2f, forward=%.2f conv=%u/%u\n",
+                              visionError.angleError, visionError.forwardError,
+                              converge_count, kConvergeFramesNeeded);
+                last_debug_print = currentTime;
+            }
+        } else {
+            // 无有效帧: 停伺服并复位 PID, 防数据恢复瞬间积分饱和窜动
+            stopServo();
+            if (!timeout_warned) {
+                Serial.println("WARNING: No valid vision data");
+                timeout_warned = true;
+            }
+        }
+
+        result.converged = isAligned();
+        return result;
     }
 
 private:

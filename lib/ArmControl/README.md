@@ -1,7 +1,8 @@
-# ArmControl — 机械臂底层电机/夹爪控制
+# ArmControl — 机械臂底层电机/夹爪控制 + 视觉对准
 
-> 封装三个机械臂电机（共用 Serial2 总线，地址与底盘 1~4 错开）与一个夹爪舵机。
-> 只管"怎么驱动"，不含任务时序/状态机（那是 *ArmSequence* 的职责）。
+> 封装三个机械臂电机（共用 Serial2 总线，地址与底盘 1~4 错开）、一个夹爪舵机，
+> 并**集成视觉对准**（角度+前后 PID 闭环 + 串流握手 + 收敛判定），供 *ArmSequence*（阶段1）
+> 与 *PlaceSequence*（阶段2）共用。只管"怎么驱动 + 怎么对准"，不含任务时序/步骤编排。
 > [ ! ] 全程序只能创建一个实例（电机地址固定）。占位参数见 [doc/ARM_TUNING.md](../../doc/ARM_TUNING.md)。
 
 ## 管理的执行器
@@ -11,7 +12,9 @@
 - 夹爪舵机：ESP32 LEDC PWM（50Hz，通道 4），grip/release 到固定角度
 
 ## 构造与析构
-- `ArmControl()` — 取 `ControlSerial::get_instance()` 单例；初始化夹爪 LEDC PWM，上电默认 `release()`
+- `ArmControl(VisionSerial* vision)` — 取 `ControlSerial::get_instance()` 单例；内部 `new` 一个
+  `VisionStreamHandshake`（持有 vision，析构时 delete）；初始化夹爪 LEDC PWM，上电默认 `release()`
+    - [ ! ] 须在 *VisionSerial* 之后创建（构造依赖它）
 
 ## 停止
 - `stop()` — 停三个电机（角度+上下+前后）并 `resetPID()`
@@ -23,6 +26,18 @@
     - 积分带 `integral_limit` 限幅，输出按 `max_rpm` 限幅
     - 角度+前后合并为一条长命令一次性下发（持锁 → clear → append×2 → send）
     - [ ! ] 误差单位是**像素**（树莓派输出），不是角度/毫米
+
+## 视觉对准（集成: 串流握手 + PID 伺服 + 收敛判定）
+两阶段（夹取/放置）共用的对准机制，从原 ArmSequence 抽出合并进来。只管角度(5)+前后(7)，不碰上下(6)。
+- `beginAlign(errorType, color, now)` — 开会话：`handshake.start` 请求串流（误差1/2）+ `resetPID` + 收敛清零
+- `updateAlign(now) → AlignFrame{freshFrame, color, converged}` — 伺服一帧：
+    - 读 `vision->read()`，仅接受 `id1 == 请求类型` 的帧（滤掉切流瞬间的旧帧）
+    - 匹配则 `handshake.confirm()` + `updateVisualServo` + 收敛计数；不匹配则 `stopServo` 防积分饱和
+    - 返回本帧是否新鲜/颜色/是否已收敛；**不记色、不打印阶段提示**（交调用方按 AlignFrame 处理）
+- `isStreaming()` / `isAligned()` / `expectedErrorType()` — 状态查询
+- `retryAlignIfNeeded(now)` — START 超时重传；`stopAlignStream()` — 通知树莓派停发
+- `setCountConvergence(bool)` — 对准完成转位置控制后置 false，避免位置态误判收敛
+- 收敛阈值 `kConvergeFramesNeeded`/`kConvergeAngleThresh`/`kConvergeForwardThresh`（连续入阈帧数 + 双轴像素阈值）
 
 ## 位置控制（绝对角度）
 - `setPosition(address, deg)` — 通用位置控制，`X_generate_set_position_command`(0xFD) **原样下发不取负**

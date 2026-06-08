@@ -143,16 +143,17 @@ void setup() {
     // 初始化底盘控制 (地址 1~4, 单例)
     g_bottom_control = &(BottomControl::get_instance());
 
-    // 初始化机械臂控制 (地址 5/6/7, 共用同一 Serial2 总线)
-    g_arm_control = new ArmControl();
-
     // ---- 初始化视觉数据串口 (Serial1) ----
     // GPIO18 = RX (接树莓派 TX), GPIO19 = TX (接树莓派 RX)
     // 协议: 0xAA + ID1(uint8) + ID2(uint8) + 角度误差(int16 LE) + 前后误差(int16 LE), 共 8 字节
+    // [ ! ] 须在 ArmControl 之前创建: ArmControl 集成视觉对准, 构造需传入 VisionSerial 指针
     g_vision_serial = new VisionSerial(kVisionBaudRate, kVisionRxPin, kVisionTxPin);
 
-    // 初始化机械臂任务编排 (依赖 ArmControl 与 VisionSerial, 须在二者之后创建)
-    g_arm_sequence = new ArmSequence(g_arm_control, g_vision_serial);
+    // 初始化机械臂控制 (地址 5/6/7, 共用同一 Serial2 总线; 集成视觉对准, 依赖 VisionSerial)
+    g_arm_control = new ArmControl(g_vision_serial);
+
+    // 初始化机械臂任务编排 (依赖 ArmControl, 须在其之后创建)
+    g_arm_sequence = new ArmSequence(g_arm_control);
 
     // 初始化物料盘控制 (骨架; 与底盘/机械臂共用 Serial2 总线)
     g_tray_control = new TrayControl();
