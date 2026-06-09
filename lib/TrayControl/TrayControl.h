@@ -8,7 +8,8 @@
  * @note  机构: 一条环形同步带 (上贴一个挡片) 把松散排成一列的物料绕圈推送,
  *        出入口共用; 出入口正下方一个顶料舵机, 仓内一侧一个挡板舵机。
  * @note  硬件:
- *          - 同步带步进电机: Serial2 总线地址 8, 绝对角度位置控制 (顺时针为负/逆时针为正)
+ *          - 同步带步进电机: Serial2 总线地址 8, 绝对角度位置控制
+ *            (正值 = 挡片逆时针转 = 让出出入口方向; 负值 = 顺时针 = 把料往仓里推/压紧方向)
  *          - 舵机1 (顶料): LEDC PWM, 两固定位 升起/落下, 初始 = 落下
  *          - 舵机2 (挡板): LEDC PWM, 两固定位 升起/降下, 初始 = 升起
  * @note  与底盘(1~4)、机械臂(5~7)共用同一 Serial2 总线 (ControlSerial 单例)。
@@ -32,16 +33,16 @@ private:
     static constexpr float kBeltSpeed = 50.0f;   // 同步带移动转速 (rpm), 待调
 
     // ---- 顶料舵机 (舵机1, LEDC PWM) ----
-    static constexpr int kLiftPin = 25;          // 顶料舵机信号引脚 (GPIO), 待定
+    static constexpr int kLiftPin = 22;          // 顶料舵机信号引脚 (GPIO22)
     static constexpr int kLiftChannel = 5;       // LEDC 通道 (避开夹爪的 4)
-    static constexpr float kLiftUpAngle = 90.0f;   // 升起角度 (度), 待测
-    static constexpr float kLiftDownAngle = 0.0f;  // 落下角度 (度), 待测
+    static constexpr float kLiftUpAngle = 90.0f;   // 升起角度 (度): 0=下, 90=上
+    static constexpr float kLiftDownAngle = 0.0f;  // 落下角度 (度): 初始位
 
     // ---- 挡板舵机 (舵机2, LEDC PWM) ----
-    static constexpr int kBafflePin = 26;        // 挡板舵机信号引脚 (GPIO), 待定
+    static constexpr int kBafflePin = 23;        // 挡板舵机信号引脚 (GPIO23)
     static constexpr int kBaffleChannel = 6;     // LEDC 通道 (避开夹爪的 4 与顶料的 5)
-    static constexpr float kBaffleUpAngle = 90.0f;   // 升起角度 (度), 待测
-    static constexpr float kBaffleDownAngle = 0.0f;  // 降下角度 (度), 待测
+    static constexpr float kBaffleUpAngle = 90.0f;   // 升起角度 (度): 初始位, 0=下, 90=上
+    static constexpr float kBaffleDownAngle = 0.0f;  // 降下角度 (度): 挡住定位
 
     // ---- 舵机 PWM 公共参数 (同 ArmControl 夹爪) ----
     static constexpr int kPwmFreq = 50;          // 舵机标准 50Hz
@@ -49,8 +50,32 @@ private:
     static constexpr float kMinPulseUs = 500.0f;   // 0 度对应脉宽 (us)
     static constexpr float kMaxPulseUs = 2500.0f;  // 180 度对应脉宽 (us)
 
-    // ---- 入仓推进 / 到位判定 / 超时 (占位, 待调) ----
-    static constexpr float kFeedStepDeg = 360.0f;          // 入仓每次固定推进增量 (度), 待测
+    // ---- 入仓动作角度 (绝对角度, 占位, 待测) ----
+    // 零点约定: 上电零点 = 物料被推入仓后停的位置 (推入位)。
+    //   等待放料时挡片退到正角度 (让出出入口); 放料后推回零点把料送进仓。
+    //   方向: 等待位(正, 逆时针让出出入口) → 推入位(0), 挡片顺时针(向负)走把料送入;
+    //         压紧/出料继续往负方向(顺时针)推。
+    static constexpr float kEntryAngleDeg = 270.0f;    // 等待放料时退回的正角度 (让出入口), 待测
+    static constexpr float kStoreInDeg = 0.0f;        // 放料后把物料推入仓的目标角 (=零点), 待测
+    static constexpr float kCompactPreDeg = -15.0f;   // 压紧前置位: 先转到此角再降挡板 (零点-30), 待测
+
+    // ---- 压紧 / 出料 角度对照表: 索引 = 仓内物料数量, 值 = 步进电机绝对角度 (度) ----
+    // [ ! ] 占位全 0, 必须现场逐个测量。值应为负 (压紧/出料方向为负)。
+    //   compact():  用 kTightenTable[count]   把当前 count 个物料压紧。
+    //   dispense(): 用 kTightenTable[count-1], 出一个后剩余物料的压紧位 (头块送到出料口)。
+    static constexpr float kTightenTable[10] = {
+        0.0f,   // 0 个 (空仓 / home)
+        -850.0f,   // 1 个
+        -732.0f,   // 2 个
+        -670.0f,   // 3 个
+        -605.0f,   // 4 个
+        -471.0f,   // 5 个
+        -295.0f,   // 6 个
+        -187.0f,   // 7 个
+        -100.0f,   // 8 个
+        -20.0f,   // 9 个 (最多)
+    };
+
     static constexpr float kPosArrivedThreshDeg = 5.0f;    // 同步带到位判定阈值 (度)
     static constexpr uint32_t kBeltMoveTimeoutMs = 15000;  // 同步带移动超时保护 (ms)
     static constexpr uint32_t kServoSettleMs = 500;        // 舵机动作 settle 等待 (ms), 待调
@@ -63,11 +88,13 @@ private:
         IDLE,                // 空闲
 
         // ---- 入仓 (分两次调用: prepareStore 放料前, store 放料后) ----
-        STORE_WAIT_PLACE,    // prepareStore 后: 舵机1 已升起, 停此等机械臂放料 + 等 store()
+        STORE_RETRACT,       // prepareStore 后: 舵机1 升起 + 挡片退到入口负角, 轮询到位 → 等放料
+        STORE_WAIT_PLACE,    // 挡片已退到位, 舵机1 升起, 停此等机械臂放料 + 等 store()
         STORE_LIFT_DOWN,     // store 触发: 舵机1 落下, 等 settle
-        STORE_PUSH,          // 同步带推进固定一小步, 轮询到位 → 计数+1 → IDLE
+        STORE_PUSH,          // 同步带挡片推回零点把料送进仓, 轮询到位 → 计数+1 → IDLE
 
         // ---- 压紧 (出仓前必做, 末态挡板保持降下) ----
+        COMPACT_PRE_MOVE,    // 先把挡片转到前置位 (零点-30), 轮询到位 → 降挡板
         COMPACT_BAFFLE_DOWN, // 舵机2 降下, 等 settle
         COMPACT_PUSH,        // 同步带走到压紧角 (查表值), 轮询到位 → IDLE
 
@@ -117,7 +144,7 @@ public:
 
     /**
      * @brief 同步带电机走到绝对角度 (位置控制)
-     * @param deg 目标绝对角度 (度), 相对上电零点; 正=逆时针, 负=顺时针
+     * @param deg 目标绝对角度 (度), 相对上电零点; 正=逆时针(让出出入口方向), 负=顺时针(推料/压紧方向)
      * @note  发一次即可, 电机内部闭环走到位; 到位判定靠 readBeltAngle 轮询。
      */
     void beltRunToAngle(float deg) {
@@ -167,22 +194,23 @@ public:
     // ========================================================================
 
     /**
-     * @brief 入仓-放料前: 舵机1 升起到承接位, 等机械臂放料
-     * @note  仅空闲时响应。之后机械臂放料, 再调 store() 推进落下+推进。
+     * @brief 入仓-放料前: 舵机1 升起承接 + 同步带挡片退到入口位 (负角, 让出出入口)
+     * @note  仅空闲时响应。之后机械臂放料, 再调 store() 把料推进仓。
      */
     void prepareStore() {
         if (state != IDLE) {
             return;
         }
         liftUp();
-        state = STORE_WAIT_PLACE;
+        belt_target_deg = kEntryAngleDeg;   // 挡片退到负角, 让出入口空间
+        beltRunToAngle(belt_target_deg);
+        state = STORE_RETRACT;
         step_start_time = millis();
     }
 
     /**
-     * @brief 入仓-放料后: 舵机1 落下, 随后同步带推进固定一小步
-     * @note  仅在 prepareStore 后的等待态 (STORE_WAIT_PLACE) 响应;
-     *        推进到位后 material_count 自动 +1 (在状态机内)。
+     * @brief 入仓-放料后: 舵机1 落下, 随后同步带挡片推回零点把料送进仓
+     * @note  仅在等待放料态 (STORE_WAIT_PLACE) 响应; 推入到位后 material_count 自动 +1。
      */
     void store() {
         if (state != STORE_WAIT_PLACE) {
@@ -194,34 +222,34 @@ public:
     }
 
     /**
-     * @brief 压紧 (出仓前必做): 挡板降下并保持, 同步带走到压紧角
-     * @param targetDeg 压紧目标绝对角度 (上层按 count() 查表传入)
-     * @note  仅空闲时响应。末态挡板保持降下 (供随后出仓继续当挡板)。
-     *        压紧到位时, 队首物料已被送到出料口。
+     * @brief 压紧 (出仓前必做): 先把挡片转到前置位 → 降挡板 → 同步带把当前物料推紧
+     * @note  仅空闲时响应。前置: 挡片先转到 kCompactPreDeg (零点-30), 再降挡板,
+     *        避免挡板下落时与物料干涉。压紧角按当前数量查内部表 kTightenTable[count]。
+     *        末态挡板保持降下 (供随后出仓继续当挡板); 压紧到位时队首物料已到出料口。
      */
-    void compact(float targetDeg) {
+    void compact() {
         if (state != IDLE) {
             return;
         }
-        baffleDown();
-        belt_target_deg = targetDeg;
-        state = COMPACT_BAFFLE_DOWN;
+        belt_target_deg = kCompactPreDeg;   // 先转到前置位
+        beltRunToAngle(belt_target_deg);
+        state = COMPACT_PRE_MOVE;
         step_start_time = millis();
     }
 
     /**
-     * @brief 出仓: 舵机1 升起 → (机械臂夹走) → 落下 → 同步带移到下一目标角
-     * @param nextDeg 同步带下一目标绝对角度 (上层按 "物料数-1" 查表传入)
-     * @note  仅空闲时响应。前提是已先 compact (挡板已降下、物料已在出料口),
+     * @brief 出仓: 舵机1 升起 → (机械臂夹走) → 落下 → 同步带移到剩余物料压紧位
+     * @note  仅空闲且仓非空时响应。前提是已先 compact (挡板已降下、物料已在出料口),
      *        故出仓全程不动挡板。升起后停在 DISP_LIFT_UP 等 notifyPicked();
-     *        带子移动到位后 material_count 自动 -1 (在状态机内)。
+     *        带子目标为 kTightenTable[count-1] (出一个后剩余物料压紧位);
+     *        移动到位后 material_count 自动 -1 (在状态机内)。
      */
-    void dispense(float nextDeg) {
-        if (state != IDLE) {
+    void dispense() {
+        if (state != IDLE || material_count <= 0) {
             return;
         }
         liftUp();
-        belt_target_deg = nextDeg;
+        belt_target_deg = tightenAngleFor(material_count - 1);
         state = DISP_LIFT_UP;
         step_start_time = millis();
     }
@@ -276,21 +304,28 @@ public:
             case IDLE:
                 break;
 
+            // ---- 入仓: 挡片退到入口负角, 到位 → 等机械臂放料 ----
+            case STORE_RETRACT:
+                if (beltArrived()) {
+                    state = STORE_WAIT_PLACE;
+                    step_start_time = now;
+                } else if (timedOut(now, kBeltMoveTimeoutMs)) {
+                    Serial.println("ERROR: Tray store retract timeout! Stopping.");
+                    stop();
+                }
+                break;
+
             // ---- 入仓: 等机械臂放料 + 等 store() 调用; 此处不自动推进 ----
             case STORE_WAIT_PLACE:
                 break;
 
-            // ---- 入仓: 舵机1 落下 settle 后, 同步带推进固定一小步 ----
+            // ---- 入仓: 舵机1 落下 settle 后, 挡片推回零点把料送进仓 ----
             case STORE_LIFT_DOWN:
                 if (settled(now)) {
-                    float current = 0.0f;
-                    // 在当前位置基础上推进固定增量; 读不到位置则跳过本帧重试
-                    if (readBeltAngle(current)) {
-                        belt_target_deg = current + kFeedStepDeg;
-                        beltRunToAngle(belt_target_deg);
-                        state = STORE_PUSH;
-                        step_start_time = now;
-                    }
+                    belt_target_deg = kStoreInDeg;   // 推回零点 (= 物料推入位)
+                    beltRunToAngle(belt_target_deg);
+                    state = STORE_PUSH;
+                    step_start_time = now;
                 }
                 break;
 
@@ -305,9 +340,22 @@ public:
                 }
                 break;
 
-            // ---- 压紧: 挡板降下 settle 后, 同步带走到压紧角 ----
+            // ---- 压紧: 挡片转到前置位, 到位 → 降挡板 ----
+            case COMPACT_PRE_MOVE:
+                if (beltArrived()) {
+                    baffleDown();
+                    state = COMPACT_BAFFLE_DOWN;
+                    step_start_time = now;
+                } else if (timedOut(now, kBeltMoveTimeoutMs)) {
+                    Serial.println("ERROR: Tray compact pre-move timeout! Stopping.");
+                    stop();
+                }
+                break;
+
+            // ---- 压紧: 挡板降下 settle 后, 同步带走到压紧角 (查表) ----
             case COMPACT_BAFFLE_DOWN:
                 if (settled(now)) {
+                    belt_target_deg = tightenAngleFor(material_count);
                     beltRunToAngle(belt_target_deg);
                     state = COMPACT_PUSH;
                     step_start_time = now;
@@ -365,6 +413,19 @@ private:
     /// @brief 当前步骤是否超过给定超时
     bool timedOut(uint32_t now, uint32_t limit) const {
         return (now - step_start_time) > limit;
+    }
+
+    /**
+     * @brief 按物料数量查压紧角度表
+     * @param n 物料数量 (索引)
+     * @return 该数量对应的步进电机绝对角度 (度); 越界则钳到表两端
+     * @note  表见 kTightenTable, 占位待测。
+     */
+    float tightenAngleFor(int n) const {
+        const int maxIndex = static_cast<int>(sizeof(kTightenTable) / sizeof(kTightenTable[0])) - 1;
+        if (n < 0) n = 0;
+        if (n > maxIndex) n = maxIndex;
+        return kTightenTable[n];
     }
 
     /// @brief 同步带是否走到目标角度 (读位置且在阈值内)
