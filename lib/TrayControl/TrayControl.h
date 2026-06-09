@@ -1,23 +1,91 @@
 #pragma once
 #include <ControlSerial.h>
+#include <Arduino.h>
+#include <cmath>
 
 /**
- * @brief 物料盘控制类 (骨架, 动作待补)
- * @note  物料盘是独立硬件子系统, 有自己的电机/舵机, 负责存料 / 转位 / 出料。
- * @note  与底盘(1~4)、机械臂(5~7)共用 Serial2 总线; 物料盘电机地址须 >=8 避开冲突。
- * @note  [ ! ] 当前仅占位空类: 构造取 ControlSerial 单例; 动作方法等硬件细节
- *        (地址 / 槽位数 / 转位 / 出料方式) 确定后再补。
- * @note  使用范式同 BottomControl / ArmControl (按地址直发命令)。
- * @note  == Version 0.1.0 (skeleton) ==
+ * @brief 物料盘控制类 (环形同步带 + 两个舵机)
+ * @note  机构: 一条环形同步带 (上贴一个挡片) 把松散排成一列的物料绕圈推送,
+ *        出入口共用; 出入口正下方一个顶料舵机, 仓内一侧一个挡板舵机。
+ * @note  硬件:
+ *          - 同步带步进电机: Serial2 总线地址 8, 绝对角度位置控制 (顺时针为负/逆时针为正)
+ *          - 舵机1 (顶料): LEDC PWM, 两固定位 升起/落下, 初始 = 落下
+ *          - 舵机2 (挡板): LEDC PWM, 两固定位 升起/降下, 初始 = 升起
+ * @note  与底盘(1~4)、机械臂(5~7)共用同一 Serial2 总线 (ControlSerial 单例)。
+ *        舵机 LEDC 通道避开夹爪占用的通道 4。
+ * @note  动作以非阻塞状态机实现: store/compact/dispense 仅发起, 每帧 update() 推进,
+ *        不使用 delay() 死等, 避免阻塞 50Hz 主循环与急停。
+ * @note  本类不维护颜色队列 (颜色由机械臂侧自行读写 ColorQueue); 只用一个整数计数器
+ *        material_count 记录仓内物料数量, 作为上层查表的输入。
+ * @note  "数量 → 同步带绝对角度" 的对照表属于上层 (TaskCoordinator), 不写进本类;
+ *        compact/dispense 的目标角度由调用方按数量查表后传入。
+ * @note  == Version 0.2.0 (skeleton → 状态机骨架) ==
  */
 class TrayControl {
 private:
-    // ---- 物料盘电机/舵机总线地址 (待定, >=8 避开底盘1~4、机械臂5~7) ----
-    // [ ! ] 占位: 等硬件确定后填写实际地址常量, 例如:
-    // static constexpr int kTurntableAddr = 8;   // 转盘电机
-    // static constexpr int kPusherAddr    = 9;   // 推料电机/舵机
+    // ========================================================================
+    // 硬件配置 (占位默认值, 按实际硬件修改)
+    // ========================================================================
 
+    // ---- 同步带步进电机 (Serial2 总线) ----
+    static constexpr int kBeltAddr = 8;          // 同步带电机总线地址 (避开 1~7)
+    static constexpr float kBeltSpeed = 50.0f;   // 同步带移动转速 (rpm), 待调
+
+    // ---- 顶料舵机 (舵机1, LEDC PWM) ----
+    static constexpr int kLiftPin = 25;          // 顶料舵机信号引脚 (GPIO), 待定
+    static constexpr int kLiftChannel = 5;       // LEDC 通道 (避开夹爪的 4)
+    static constexpr float kLiftUpAngle = 90.0f;   // 升起角度 (度), 待测
+    static constexpr float kLiftDownAngle = 0.0f;  // 落下角度 (度), 待测
+
+    // ---- 挡板舵机 (舵机2, LEDC PWM) ----
+    static constexpr int kBafflePin = 26;        // 挡板舵机信号引脚 (GPIO), 待定
+    static constexpr int kBaffleChannel = 6;     // LEDC 通道 (避开夹爪的 4 与顶料的 5)
+    static constexpr float kBaffleUpAngle = 90.0f;   // 升起角度 (度), 待测
+    static constexpr float kBaffleDownAngle = 0.0f;  // 降下角度 (度), 待测
+
+    // ---- 舵机 PWM 公共参数 (同 ArmControl 夹爪) ----
+    static constexpr int kPwmFreq = 50;          // 舵机标准 50Hz
+    static constexpr int kPwmResBits = 16;       // PWM 分辨率位数
+    static constexpr float kMinPulseUs = 500.0f;   // 0 度对应脉宽 (us)
+    static constexpr float kMaxPulseUs = 2500.0f;  // 180 度对应脉宽 (us)
+
+    // ---- 入仓推进 / 到位判定 / 超时 (占位, 待调) ----
+    static constexpr float kFeedStepDeg = 360.0f;          // 入仓每次固定推进增量 (度), 待测
+    static constexpr float kPosArrivedThreshDeg = 5.0f;    // 同步带到位判定阈值 (度)
+    static constexpr uint32_t kBeltMoveTimeoutMs = 15000;  // 同步带移动超时保护 (ms)
+    static constexpr uint32_t kServoSettleMs = 500;        // 舵机动作 settle 等待 (ms), 待调
+    static constexpr uint32_t kPositionReadDelayMs = 2;    // 读位置前等电机回复 (ms)
+
+    // ========================================================================
+    // 状态机
+    // ========================================================================
+    enum State {
+        IDLE,                // 空闲
+
+        // ---- 入仓 (分两次调用: prepareStore 放料前, store 放料后) ----
+        STORE_WAIT_PLACE,    // prepareStore 后: 舵机1 已升起, 停此等机械臂放料 + 等 store()
+        STORE_LIFT_DOWN,     // store 触发: 舵机1 落下, 等 settle
+        STORE_PUSH,          // 同步带推进固定一小步, 轮询到位 → 计数+1 → IDLE
+
+        // ---- 压紧 (出仓前必做, 末态挡板保持降下) ----
+        COMPACT_BAFFLE_DOWN, // 舵机2 降下, 等 settle
+        COMPACT_PUSH,        // 同步带走到压紧角 (查表值), 轮询到位 → IDLE
+
+        // ---- 出仓 (舵机2 不动, 已是降下) ----
+        DISP_LIFT_UP,        // 舵机1 升起, 等机械臂夹走 (notifyPicked 推进)
+        DISP_LIFT_DOWN,      // 夹走后 舵机1 落下, 等 settle
+        DISP_BELT_MOVE,      // 同步带走到 "数量-1" 角 (查表值), 轮询到位 → 计数-1 → IDLE
+    };
+
+    // ========================================================================
+    // 协作对象与运行时状态
+    // ========================================================================
     ControlSerial* control_serial = nullptr;  // 共用的 Serial2 命令通道 (单例)
+
+    State state = IDLE;                  // 当前状态
+    uint32_t step_start_time = 0;        // 当前步骤起始时间 (settle / 超时基准)
+    float belt_target_deg = 0.0f;        // 同步带目标角度 (到位判定)
+    int material_count = 0;              // 仓内物料数量 (上层查表输入)
 
 public:
     // 禁用拷贝和赋值
@@ -26,18 +94,300 @@ public:
 
     /**
      * @brief 创建物料盘控制对象
-     * @note  通过 ControlSerial::get_instance() 取得唯一串口实例 (与底盘/机械臂共用)。
+     * @note  取 ControlSerial 单例 (与底盘/机械臂共用 Serial2);
+     *        初始化两个舵机 LEDC PWM, 并置初始位 (顶料落下, 挡板升起)。
      */
     TrayControl() {
         this->control_serial = &(ControlSerial::get_instance());
+        // 顶料舵机 PWM
+        ledcSetup(kLiftChannel, kPwmFreq, kPwmResBits);
+        ledcAttachPin(kLiftPin, kLiftChannel);
+        // 挡板舵机 PWM
+        ledcSetup(kBaffleChannel, kPwmFreq, kPwmResBits);
+        ledcAttachPin(kBafflePin, kBaffleChannel);
+        // 初始位: 顶料落下, 挡板升起
+        liftDown();
+        baffleUp();
     }
 
+public:
     // ========================================================================
-    // 动作接口 (待补): 等物料盘硬件细节确定后, 在此添加如：
-    //   - store(color)    : 接收机械臂放入的物料, 存入槽位
-    //   - dispense(color) : 把指定颜色物料送到取料位供机械臂夹取
-    //   - update(t)       : 物料盘自身的状态机/到位推进 (若动作非阻塞)
-    //   - isBusy()        : 物料盘是否正在执行动作
-    //   - stop()          : 急停所有物料盘电机
+    // 第一层: 硬件原语 (不带时序, 一条命令对应一个硬件动作)
     // ========================================================================
+
+    /**
+     * @brief 同步带电机走到绝对角度 (位置控制)
+     * @param deg 目标绝对角度 (度), 相对上电零点; 正=逆时针, 负=顺时针
+     * @note  发一次即可, 电机内部闭环走到位; 到位判定靠 readBeltAngle 轮询。
+     */
+    void beltRunToAngle(float deg) {
+        this->control_serial->X_generate_set_position_command(kBeltAddr, deg, kBeltSpeed);
+        this->control_serial->send_command();
+    }
+
+    /**
+     * @brief 读同步带电机当前绝对位置
+     * @param deg [out] 当前角度 (度); 失败时不变
+     * @return true=读取成功, false=超时/校验失败
+     * @note  先问询, 延迟 kPositionReadDelayMs 等回复再读; 全程持锁为原子事务。
+     * @note  [ ! ] 8 号电机驱动器的 "响应" 须开启 (0x36 问询/响应协议), 否则读不到。
+     */
+    bool readBeltAngle(float& deg) {
+        this->control_serial->thread_lock();
+        this->control_serial->ask_current_position(kBeltAddr);
+        delay(kPositionReadDelayMs);
+        bool ok = this->control_serial->X_read_current_position(deg);
+        this->control_serial->thread_unlock();
+        return ok;
+    }
+
+    /// @brief 停止同步带电机
+    void beltStop() {
+        this->control_serial->thread_lock();
+        this->control_serial->generate_stop_command(kBeltAddr);
+        this->control_serial->send_command();
+        this->control_serial->thread_unlock();
+    }
+
+    /// @brief 顶料舵机升起 (托高物料)
+    void liftUp() { setServoAngle(kLiftChannel, kLiftUpAngle); }
+
+    /// @brief 顶料舵机落下 (初始位)
+    void liftDown() { setServoAngle(kLiftChannel, kLiftDownAngle); }
+
+    /// @brief 挡板舵机升起 (初始位, 让位)
+    void baffleUp() { setServoAngle(kBaffleChannel, kBaffleUpAngle); }
+
+    /// @brief 挡板舵机降下 (挡住物料定位)
+    void baffleDown() { setServoAngle(kBaffleChannel, kBaffleDownAngle); }
+
+public:
+    // ========================================================================
+    // 第二层: 组合动作 (启动即返回, 由 update() 推进; 不阻塞)
+    // ========================================================================
+
+    /**
+     * @brief 入仓-放料前: 舵机1 升起到承接位, 等机械臂放料
+     * @note  仅空闲时响应。之后机械臂放料, 再调 store() 推进落下+推进。
+     */
+    void prepareStore() {
+        if (state != IDLE) {
+            return;
+        }
+        liftUp();
+        state = STORE_WAIT_PLACE;
+        step_start_time = millis();
+    }
+
+    /**
+     * @brief 入仓-放料后: 舵机1 落下, 随后同步带推进固定一小步
+     * @note  仅在 prepareStore 后的等待态 (STORE_WAIT_PLACE) 响应;
+     *        推进到位后 material_count 自动 +1 (在状态机内)。
+     */
+    void store() {
+        if (state != STORE_WAIT_PLACE) {
+            return;
+        }
+        liftDown();
+        state = STORE_LIFT_DOWN;
+        step_start_time = millis();
+    }
+
+    /**
+     * @brief 压紧 (出仓前必做): 挡板降下并保持, 同步带走到压紧角
+     * @param targetDeg 压紧目标绝对角度 (上层按 count() 查表传入)
+     * @note  仅空闲时响应。末态挡板保持降下 (供随后出仓继续当挡板)。
+     *        压紧到位时, 队首物料已被送到出料口。
+     */
+    void compact(float targetDeg) {
+        if (state != IDLE) {
+            return;
+        }
+        baffleDown();
+        belt_target_deg = targetDeg;
+        state = COMPACT_BAFFLE_DOWN;
+        step_start_time = millis();
+    }
+
+    /**
+     * @brief 出仓: 舵机1 升起 → (机械臂夹走) → 落下 → 同步带移到下一目标角
+     * @param nextDeg 同步带下一目标绝对角度 (上层按 "物料数-1" 查表传入)
+     * @note  仅空闲时响应。前提是已先 compact (挡板已降下、物料已在出料口),
+     *        故出仓全程不动挡板。升起后停在 DISP_LIFT_UP 等 notifyPicked();
+     *        带子移动到位后 material_count 自动 -1 (在状态机内)。
+     */
+    void dispense(float nextDeg) {
+        if (state != IDLE) {
+            return;
+        }
+        liftUp();
+        belt_target_deg = nextDeg;
+        state = DISP_LIFT_UP;
+        step_start_time = millis();
+    }
+
+    /**
+     * @brief 机械臂夹走完成通知 (推进出仓后半段)
+     * @note  仅在 DISP_LIFT_UP (顶起等夹走) 时有效: 舵机1 落下, 转入带子移动。
+     */
+    void notifyPicked() {
+        if (state != DISP_LIFT_UP) {
+            return;
+        }
+        liftDown();
+        state = DISP_LIFT_DOWN;
+        step_start_time = millis();
+    }
+
+public:
+    // ========================================================================
+    // 查询 / 急停
+    // ========================================================================
+
+    /// @brief 是否有动作正在执行 (供上层判断忙闲)
+    bool isBusy() const { return state != IDLE; }
+
+    /// @brief 仓内当前物料数量 (上层查表的输入)
+    int count() const { return material_count; }
+
+    /**
+     * @brief 急停: 停同步带电机并复位状态机为 IDLE
+     * @note  舵机本质是保持当前角度 (无反馈), 此处不强制复位舵机角度;
+     *        如需归位由上层在停止后另行调用 liftDown()/baffleUp()。
+     */
+    void stop() {
+        beltStop();
+        state = IDLE;
+    }
+
+public:
+    // ========================================================================
+    // 每帧推进 (TaskCoordinator 每帧必调)
+    // ========================================================================
+
+    /**
+     * @brief 状态机推进一帧
+     * @param now 当前 millis() 时间戳
+     * @note  等舵机 settle 用 now - step_start_time; 等同步带到位用 readBeltAngle 轮询;
+     *        同步带移动带超时保护, 超时强制停车回 IDLE。
+     */
+    void update(uint32_t now) {
+        switch (state) {
+            case IDLE:
+                break;
+
+            // ---- 入仓: 等机械臂放料 + 等 store() 调用; 此处不自动推进 ----
+            case STORE_WAIT_PLACE:
+                break;
+
+            // ---- 入仓: 舵机1 落下 settle 后, 同步带推进固定一小步 ----
+            case STORE_LIFT_DOWN:
+                if (settled(now)) {
+                    float current = 0.0f;
+                    // 在当前位置基础上推进固定增量; 读不到位置则跳过本帧重试
+                    if (readBeltAngle(current)) {
+                        belt_target_deg = current + kFeedStepDeg;
+                        beltRunToAngle(belt_target_deg);
+                        state = STORE_PUSH;
+                        step_start_time = now;
+                    }
+                }
+                break;
+
+            // ---- 入仓: 同步带推进到位 → 计数+1 → 结束 ----
+            case STORE_PUSH:
+                if (beltArrived()) {
+                    material_count++;
+                    state = IDLE;
+                } else if (timedOut(now, kBeltMoveTimeoutMs)) {
+                    Serial.println("ERROR: Tray store push timeout! Stopping.");
+                    stop();
+                }
+                break;
+
+            // ---- 压紧: 挡板降下 settle 后, 同步带走到压紧角 ----
+            case COMPACT_BAFFLE_DOWN:
+                if (settled(now)) {
+                    beltRunToAngle(belt_target_deg);
+                    state = COMPACT_PUSH;
+                    step_start_time = now;
+                }
+                break;
+
+            // ---- 压紧: 同步带到位 → 结束 (挡板保持降下) ----
+            case COMPACT_PUSH:
+                if (beltArrived()) {
+                    state = IDLE;
+                } else if (timedOut(now, kBeltMoveTimeoutMs)) {
+                    Serial.println("ERROR: Tray compact push timeout! Stopping.");
+                    stop();
+                }
+                break;
+
+            // ---- 出仓: 舵机1 升起, 等机械臂夹走 (notifyPicked 推进); 此处不自动推进 ----
+            case DISP_LIFT_UP:
+                break;
+
+            // ---- 出仓: 舵机1 落下 settle 后, 同步带移到下一目标角 ----
+            case DISP_LIFT_DOWN:
+                if (settled(now)) {
+                    beltRunToAngle(belt_target_deg);
+                    state = DISP_BELT_MOVE;
+                    step_start_time = now;
+                }
+                break;
+
+            // ---- 出仓: 同步带到位 → 计数-1 → 结束 ----
+            case DISP_BELT_MOVE:
+                if (beltArrived()) {
+                    if (material_count > 0) {
+                        material_count--;
+                    }
+                    state = IDLE;
+                } else if (timedOut(now, kBeltMoveTimeoutMs)) {
+                    Serial.println("ERROR: Tray dispense belt-move timeout! Stopping.");
+                    stop();
+                }
+                break;
+        }
+    }
+
+private:
+    // ========================================================================
+    // 状态机辅助
+    // ========================================================================
+
+    /// @brief 舵机动作是否已等够 settle 时间
+    bool settled(uint32_t now) const {
+        return (now - step_start_time) >= kServoSettleMs;
+    }
+
+    /// @brief 当前步骤是否超过给定超时
+    bool timedOut(uint32_t now, uint32_t limit) const {
+        return (now - step_start_time) > limit;
+    }
+
+    /// @brief 同步带是否走到目标角度 (读位置且在阈值内)
+    bool beltArrived() {
+        float pos = 0.0f;
+        return readBeltAngle(pos) &&
+               fabsf(pos - belt_target_deg) <= kPosArrivedThreshDeg;
+    }
+
+private:
+    /**
+     * @brief 驱动舵机到指定角度 (LEDC PWM)
+     * @param channel LEDC 通道 (kLiftChannel / kBaffleChannel)
+     * @param angle   目标角度 (度), 限幅到 [0, 180]
+     * @note  角度 → 脉宽(us) → LEDC 占空比, 同 ArmControl::setGripperAngle。
+     */
+    void setServoAngle(int channel, float angle) {
+        if (angle < 0.0f) angle = 0.0f;
+        if (angle > 180.0f) angle = 180.0f;
+        float pulse_us = kMinPulseUs + (kMaxPulseUs - kMinPulseUs) * (angle / 180.0f);
+        const float period_us = 1000000.0f / kPwmFreq;
+        const uint32_t max_duty = (1u << kPwmResBits) - 1u;
+        uint32_t duty = static_cast<uint32_t>((pulse_us / period_us) * max_duty);
+        ledcWrite(channel, duty);
+    }
 };
