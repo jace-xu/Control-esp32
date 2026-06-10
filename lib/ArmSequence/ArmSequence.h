@@ -57,7 +57,7 @@ private:
 
     // 位置控制参数
     static constexpr float kPreDescendRotations = 0.0f*kVerticalDirection;    // 第一次按A先降0.5圈
-    static constexpr uint32_t kGripSettleMs = 800;          // 舵机夹取到位等待时间
+    static constexpr uint32_t kGripSettleMs = 2000;          // 舵机夹取到位等待时间
     static constexpr float kPositionArrivedThreshDeg = 5.0f;// 位置到位判定阈值 (度)
     static constexpr uint32_t kPreAlignTimeoutMs = 30000;   // PRE_ALIGN 等待第二次按A的超时 (30秒)
 

@@ -201,8 +201,15 @@ InputState read() {
     state.connected = true;
     state.hasFreshData = activeController->hasData();
 
+    // [ ! ] 超时判定基于"链路是否在线", 不基于"有没有新数据帧"。
+    //   Bluepad32 的 hasData() 在手柄状态不变时返回 false (手柄静止 = 无新包),
+    //   若用它更新时间戳, 则手动瞄准 (P_AIM) 长时间不碰键会被误判断流 → 误触发急停、
+    //   把放置流程打回 IDLE。改为: 只要 getActiveController() 仍返回有效 (isConnected),
+    //   本帧就视为链路在线、刷新时间戳。真正断连时 getActiveController() 返回 nullptr,
+    //   上面已走 connected=false 分支急停, 走不到这里。
+    g_lastControllerDataMs = state.timestampMs;
+
     if (state.hasFreshData) {
-        g_lastControllerDataMs = state.timestampMs;
         fillSticksAndTriggers(activeController, state);
         fillButtons(activeController, state);
         fillChassisCommand(state);
@@ -211,10 +218,8 @@ InputState read() {
         return state;
     }
 
-    if ((state.timestampMs - g_lastControllerDataMs) > kControllerTimeoutMs) {
-        state.timedOut = true;
-    }
-
+    // 无新数据帧 (手柄静止, 非断流): hasFreshData=false 供 main 区分底盘是否更新;
+    // 链路仍在线, 不判超时, 故放置流程/手动瞄准可长时间保持不被打断。
     return state;
 }
 

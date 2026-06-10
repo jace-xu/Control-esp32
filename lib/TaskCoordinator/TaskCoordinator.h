@@ -43,7 +43,7 @@ private:
         // ---- 回位 (按一次 X 进入, 内部自动依次到位; 防撞顺序: 先收上下+前后→0, 再角度→0, 最后前后伸出) ----
         P_RET_LIFT,        // 回位step1: 上下→0 + 前后→0 (打包), 轮询两轴到位
         P_RET_ANGLE,       // 回位step2: 角度→0, 轮询到位
-        P_RET_EXTEND,      // 回位step3: 前后→-430 领料位, 到位后 续下一块/结束
+        P_RET_EXTEND,      // 回位step3: 前后→+430 领料位, 到位后 续下一块/结束
     };
 
     // ========================================================================
@@ -57,7 +57,7 @@ private:
     static constexpr float kReturnVerticalDeg      = 0.0f;     // 回位 step1: 上下→0
     static constexpr float kReturnForwardHomeDeg   = 0.0f;     // 回位 step1: 前后→0 (先收回, 防撞)
     static constexpr float kReturnAngleDeg         = 0.0f;     // 回位 step2: 角度→0
-    static constexpr float kReturnForwardExtendDeg = -430.0f;  // 回位 step3: 前后伸到领料位 (-430)
+    static constexpr float kReturnForwardExtendDeg = 430.0f;   // 回位 step3: 前后伸到领料位 (+430, 与夹取收臂 kStowForwardExtendDeg 方向统一)
 
     // 回位到位判定 (P_RETURN_* 自动轮询, 撞机风险高需按序保证)
     static constexpr float kPositionArrivedThreshDeg = 5.0f;   // 到位阈值 (度)
@@ -65,7 +65,7 @@ private:
 
     // 手动点动 (d-pad 位置步进)
     static constexpr float kJogStepDeg    = 2.0f;    // 每帧按住步进量 (度, 占位)
-    static constexpr float kJogAngleSign  = 1.0f;    // 左右→角度 方向因子 (反了取负)
+    static constexpr float kJogAngleSign  = 0.5f; // 左右→角度 方向因子 (反了取负)
     static constexpr float kJogForwardSign = 1.0f;   // 上下→前后 方向因子 (反了取负)
 
     static constexpr uint32_t kStepLockMs = 200;     // 步进后忽略 X 的最短停留 (防手快误推进)
@@ -297,7 +297,7 @@ private:
     /**
      * @brief 回位段自动推进 (P_RELEASE 后按一次 X 进入; 内部依次到位)
      * @param now 当前 millis()
-     * @note  防撞顺序: 上下+前后→0 (一起) → 角度→0 → 前后伸到 -430 领料位。
+     * @note  防撞顺序: 上下+前后→0 (一起) → 角度→0 → 前后伸到 +430 领料位。
      *        每段用 readPosition 轮询到位 (阈值 kPositionArrivedThreshDeg), 带超时保护。
      */
     void runReturn(uint32_t now) {
@@ -316,14 +316,14 @@ private:
                 }
                 break;
 
-            // step2: 角度→0 到位 → 前后伸到 -430 领料位
+            // step2: 角度→0 到位 → 前后伸到 +430 领料位
             case P_RET_ANGLE:
                 if (angleArrived()) {
                     arm->setForwardPosition(kReturnForwardExtendDeg);
                     forward_target = kReturnForwardExtendDeg;
                     place_state = P_RET_EXTEND;
                     step_time = now;
-                    Serial.println("[Place] P_RET_EXTEND: forward -> -430 (pickup pose)");
+                    Serial.println("[Place] P_RET_EXTEND: forward -> +430 (pickup pose)");
                 } else if ((now - step_time) > kReturnTimeoutMs) {
                     Serial.println("ERROR: [Place] return step2 (angle) timeout! Aborting.");
                     abortPlacement();
@@ -444,6 +444,7 @@ private:
             case P_RELEASE:
                 arm->setVerticalForwardPosition(kReturnVerticalDeg, kReturnForwardHomeDeg);
                 forward_target = kReturnForwardHomeDeg;
+                delay(kBusDelayMs);   // 与下一帧 runReturn 的 readPosition 隔开, 防 0 间隔挤掉刚发的位置命令 (同夹取下降 bug)
                 place_state = P_RET_LIFT;
                 Serial.println("[Place] P_RET_LIFT: vertical+forward -> 0 (auto arrive)");
                 break;
