@@ -49,19 +49,27 @@ private:
     bool timeout_warned = false;      // "无有效视觉数据" 警告是否已打印过
     uint32_t last_debug_print = 0;    // 上次打印视觉误差调试信息的时间戳
     bool count_convergence = true;    // 是否在本次会话累计收敛 (对准期 true)
+    bool servo_idle_stopped = false;  // 无数据期是否已停过一次伺服 (防每帧重发停止命令灌总线)
 
 
     // PID controller parameters (tunable)
-    float kp_angle = 30.0f;       // P gain for angle servo
+    // [ ! ] 这里是唯一权威来源 (现场标定值)。运行时如需改, 调 setAnglePID/setForwardPID。
+    float kp_angle = 0.02f;      // P gain for angle servo
     float ki_angle = 0.0f;        // I gain for angle servo (积分项)
-    float kd_angle = 0.0f;        // D gain for angle servo (微分项)
+    float kd_angle = 0.003f;      // D gain for angle servo (微分项)
 
-    float kp_forward = 30.0f;     // P gain for forward servo
+    float kp_forward = 0.2f;     // P gain for forward servo
     float ki_forward = 0.0f;      // I gain for forward servo
-    float kd_forward = 0.0f;      // D gain for forward servo
+    float kd_forward = 0.003f;    // D gain for forward servo
 
     float deadzone = 5.0f;        // Error deadzone threshold
-    float max_rpm = 100.0f;       // Maximum motor speed limit
+    float max_rpm = 50.0f;       // Maximum motor speed limit
+
+    // 伺服方向因子: PID 算出的 rpm 在下发前乘以此符号, 用于翻转电机转向。
+    // [ ! ] 与 PID 增益解耦: 调"方向"只翻这里的 +1/-1, 调"力度"才动 kp/ki/kd。
+    //       联调判据: 给固定正误差, 若电机往"误差变大"方向转(发散), 把对应轴符号取反。
+    static constexpr float kAngleServoSign = -1.0f;    // 角度轴转向: +1 / -1
+    static constexpr float kForwardServoSign = 1.0f;  // 前后轴转向: +1 / -1
 
     // PID state variables (internal)
     float angle_error_integral = 0.0f;     // 角度误差积分
@@ -75,7 +83,7 @@ private:
     float integral_limit = 1000.0f;        // 积分项限制
 
     // 电机位置移动速度 (rpm), setPosition 时使用 (角度/上下电机共用)
-    static constexpr float kPosSpeed = 50.0f;
+    static constexpr float kPosSpeed = 15.0f;
 
     // 位置问询后等待电机回复的时间 (ms), readVerticalPosition 时使用
     // 给电机收到问询、处理、回 8 字节的往返留出时间, 否则 read 会提前超时
@@ -249,18 +257,22 @@ public:
             forward_error_last = 0.0f;
         }
 
+        // 方向因子: 下发前乘以转向符号 (与增益解耦, 翻方向只改 kAngleServoSign/kForwardServoSign)
+        angle_rpm *= kAngleServoSign;
+        forward_rpm *= kForwardServoSign;
+
         // 角度 + 前后 两条速度命令合并为一条长命令一次性下发:
         // 单次总线事务, 两个伺服电机更同步, 也省去逐条 flush 的开销。
         // 上下电机已改用位置控制(设一次), 不在此每帧重发。
         // 全程持锁, 防止 append 序列被其他线程的命令插入而错帧。
-        this->control_serial->thread_lock();
+        
         this->control_serial->clear_long_command();
         this->control_serial->X_generate_set_rotate_speed_command(kAngleAddr, angle_rpm);
         this->control_serial->append_command();
         this->control_serial->X_generate_set_rotate_speed_command(kForwardAddr, forward_rpm);
         this->control_serial->append_command();
         this->control_serial->send_long_command();
-        this->control_serial->thread_unlock();
+
     }
 
 
@@ -293,6 +305,30 @@ public:
     /// @note  供阶段1 收臂归位使用 (前后电机平时是 PID 速度控制)
     void setForwardPosition(float positionDegrees) {
         setPosition(kForwardAddr, positionDegrees);
+    }
+
+    /**
+     * @brief 角度+前后两个电机位置命令打包成一条长指令一次性下发
+     * @param angleDegrees   角度电机目标绝对角 (度)
+     * @param forwardDegrees 前后电机目标绝对角 (度)
+     * @note  两条 0xFD 位置子命令拼进同一个长指令帧 (0xAA 头), 单次 Serial2 写出,
+     *        避免两条命令背靠背发送时的帧间隔/丢帧问题。
+     * @note  全程持递归锁为原子事务, 防其他线程在拼帧期间插命令。
+     * @note  供 PRE_CATCH 预备摆位使用 (角度+前后同时到位)。
+     */
+    void setAngleForwardPosition(float angleDegrees, float forwardDegrees) {
+        this->control_serial->thread_lock();
+        this->control_serial->clear_long_command();
+        // 角度电机子命令: 构造到 command 缓冲后追加进长指令
+        this->control_serial->X_generate_set_position_command(
+            kAngleAddr, angleDegrees, kPosSpeed);
+        this->control_serial->append_command();
+        // 前后电机子命令
+        this->control_serial->X_generate_set_position_command(
+            kForwardAddr, forwardDegrees, kPosSpeed);
+        this->control_serial->append_command();
+        this->control_serial->send_long_command();
+        this->control_serial->thread_unlock();
     }
 
     /**
@@ -406,6 +442,7 @@ public:
         converge_count = 0;
         timeout_warned = false;
         count_convergence = true;
+        servo_idle_stopped = false;   // 新会话: 重置断流停止守卫
     }
 
     /// @brief 是否累计收敛 (对准期 true; 转位置控制后调用方置 false)
@@ -415,7 +452,11 @@ public:
     bool isStreaming() const { return handshake->isStreaming(); }
 
     /// @brief 当前是否已连续收敛达标
-    bool isAligned() const { return converge_count >= kConvergeFramesNeeded; }
+    /// @note  [手动确认模式] 收敛判定已注释 (converge_count 不再累加, 恒为 0),
+    ///        故此处无条件返回 true: 第二次按 A 即视为"已对准", 直接确认下降。
+    ///        若要恢复自动收敛: 取消 updateAlign 里收敛计数块的注释, 并改回
+    ///        return converge_count >= kConvergeFramesNeeded;
+    bool isAligned() const { return true; }
 
     /// @brief 本次串流请求的误差类型 (1/2)
     uint8_t expectedErrorType() const { return handshake->expectedErrorType(); }
@@ -443,22 +484,23 @@ public:
         if (frameMatches) {
             handshake->confirm();   // 类型匹配: 确认握手成功 (停止 START 重传)
             timeout_warned = false;
+            servo_idle_stopped = false;   // 数据恢复: 重新允许下次断流时再停一次
             result.freshFrame = true;
             result.color = visionError.id2;
 
             updateVisualServo(visionError.angleError, visionError.forwardError);
 
             // 收敛判定: 角度与前后误差同时入阈才计数, 任一超阈值则清零。
-            if (count_convergence) {
-                if (fabsf(visionError.angleError) <= kConvergeAngleThresh &&
-                    fabsf(visionError.forwardError) <= kConvergeForwardThresh) {
-                    if (converge_count < kConvergeFramesNeeded) {
-                        converge_count++;
-                    }
-                } else {
-                    converge_count = 0;
-                }
-            }
+            // if (count_convergence) {
+            //     if (fabsf(visionError.angleError) <= kConvergeAngleThresh &&
+            //         fabsf(visionError.forwardError) <= kConvergeForwardThresh) {
+            //         if (converge_count < kConvergeFramesNeeded) {
+            //             converge_count++;
+            //         }
+            //     } else {
+            //         converge_count = 0;
+            //     }
+            // }
 
             // 调试输出: 每 200ms 打印一次视觉误差值
             if ((currentTime - last_debug_print) > 200) {
@@ -468,8 +510,13 @@ public:
                 last_debug_print = currentTime;
             }
         } else {
-            // 无有效帧: 停伺服并复位 PID, 防数据恢复瞬间积分饱和窜动
-            stopServo();
+            // 无有效帧: 停伺服并复位 PID, 防数据恢复瞬间积分饱和窜动。
+            // [ ! ] 只在"由有数据→无数据"的边沿停一次, 不每帧重发: 每帧停止命令会持续
+            //       占用 Serial2 总线, 干扰同总线上下电机(6)的位置命令时序。
+            if (!servo_idle_stopped) {
+                stopServo();
+                servo_idle_stopped = true;
+            }
             if (!timeout_warned) {
                 Serial.println("WARNING: No valid vision data");
                 timeout_warned = true;

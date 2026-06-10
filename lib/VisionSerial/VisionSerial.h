@@ -39,6 +39,13 @@ private:
     static constexpr size_t kPacketSize = 8;
     static constexpr uint32_t kDataTimeoutMs = 500;
 
+    // [调试] 原始字节嗅探: 把视觉串口收到的原始字节打印到 USB 串口, 用于排查链路。
+    //   - 完全没打印      → 一个字节都没收到: 查接线(RX=GPIO18接树莓派TX)/共地/树莓派程序/波特率
+    //   - 打印但无 0xAA   → 收到数据但帧头不对: 协议/波特率不匹配
+    //   - 有 0xAA 仍无伺服 → 帧头对但校验或 id1 类型不匹配 (看 parsePacket 丢弃)
+    // 调通后改为 false 关闭。
+    static constexpr bool kDebugRawBytes = false;
+
     // ESP32 → 树莓派 命令协议 (与误差数据方向相反)
     // 包格式: 0xBB + CMD + PARAM + 校验(0xBB ^ CMD ^ PARAM), 共 4 字节
     static constexpr uint8_t kCmdHeader = 0xBB;   // 命令包头 (区别于误差包 0xAA)
@@ -83,6 +90,11 @@ public:
 
         while (serial->available() > 0) {
             uint8_t byte = serial->read();
+
+            // [调试] 打印每个收到的原始字节 (调通后把 kDebugRawBytes 置 false)
+            if (kDebugRawBytes) {
+                Serial.printf("VRX %02X\n", byte);
+            }
 
             // State machine: looking for header
             if (!foundHeader) {

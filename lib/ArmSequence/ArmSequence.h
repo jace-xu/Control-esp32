@@ -40,8 +40,8 @@ private:
     // [ ! ] 圈数带符号: 正=下降约定。setPosition 原样下发, 方向反了改这里符号即可。
     //       目标绝对角度 = 圈数常量 × 360。
     // ========================================================================
-    static constexpr float kVerticalDirection = 1.0f;  // 上下方向因子: 正=下降, 负=上升
-    static constexpr float kRotationDirection = 1.0f;  // 旋转方向因子: 正=逆时针, 负=顺时针
+    static constexpr float kVerticalDirection = -1.0f;  // 上下方向因子: 负=下降, 正=上升
+    static constexpr float kRotationDirection = -1.0f;  // 旋转方向因子: 正=逆时针, 负=顺时针
 
     static constexpr float kDescendTargetRotations = 5.0f*kVerticalDirection;  // 下降到夹取位: 5 圈
 
@@ -56,13 +56,14 @@ private:
     static constexpr uint32_t kAscentTimeoutMs = 12000;  // 回升/归位超时保护: 12 秒
 
     // 位置控制参数
-    static constexpr float kPreDescendRotations = 0.5f*kVerticalDirection;    // 第一次按A先降0.5圈
+    static constexpr float kPreDescendRotations = 0.0f*kVerticalDirection;    // 第一次按A先降0.5圈
     static constexpr uint32_t kGripSettleMs = 800;          // 舵机夹取到位等待时间
     static constexpr float kPositionArrivedThreshDeg = 5.0f;// 位置到位判定阈值 (度)
     static constexpr uint32_t kPreAlignTimeoutMs = 30000;   // PRE_ALIGN 等待第二次按A的超时 (30秒)
 
     // PRE_CATCH 预备摆位参数 (前置, 按 L1 触发)
-    static constexpr float kPreCatchAngleDeg = 10.0f*kRotationDirection;       // 角度电机预备摆位目标绝对角
+    static constexpr float kPreCatchAngleDeg = 180.0f*kRotationDirection;       // 角度电机预备摆位目标绝对角
+    static constexpr float kPreCatchForwardDeg = 0.0f;      // 前后电机预备摆位目标绝对角 (占位, 现场校准)
     static constexpr uint32_t kPreCatchTimeoutMs = 30000;   // PRE_CATCH 等待按A的超时 (30秒)
 
     // ========================================================================
@@ -161,7 +162,7 @@ public:
                 startPreCatch(currentTime);
             }
         }
-        // 阶段1: PRE_CATCH 期间按 A → 请求误差1并进入 PRE_ALIGN
+        //阶段1: PRE_CATCH 期间按 A → 请求误差1并进入 PRE_ALIGN
         else if (state == PRE_CATCH && aRising) {
             Serial.println("[Stage 1] A-key: leaving pre-catch, entering pre-align");
             arm->beginAlign(1, kColorNone, currentTime);  // 请求误差1 + resetPID + 收敛清零
@@ -248,7 +249,7 @@ private:
         color_recorded_this_run = false;
         Serial.println("[Stage 1] Record: requesting error1");
         arm->beginAlign(1, kColorNone, currentTime);  // 请求误差1 + resetPID + 收敛清零
-        enterPreAlign(currentTime);
+         enterPreAlign(currentTime);
     }
 
     /**
@@ -260,8 +261,11 @@ private:
         active = true;
         servo_stopped = false;
         color_recorded_this_run = false;
-        Serial.printf("[Stage 1] Pre-catch: angle motor to %.1f deg, waiting for A\n", kPreCatchAngleDeg);
-        arm->setAnglePosition(kPreCatchAngleDeg);
+        Serial.printf("[Stage 1] Pre-catch: angle motor to %.1f deg, forward motor to %.1f deg, waiting for A\n",
+                      kPreCatchAngleDeg, kPreCatchForwardDeg);
+        // 角度+前后打包成一条长指令一次性下发 (同时摆位, 避免背靠背发送丢帧)
+        arm->setAngleForwardPosition(kPreCatchAngleDeg, kPreCatchForwardDeg);
+
         descent_start_time = currentTime;   // 复用作 PRE_CATCH 超时基准
         state = PRE_CATCH;
     }
@@ -289,6 +293,7 @@ private:
         Serial.println("[Stage 1] confirm: aligned, descending to grip position");
         arm->stopAlignStream();   // 下降期间停视觉伺服
         arm->stopServo();
+        delay(2);
         arm->setCountConvergence(false);
         float targetDeg = kDescendTargetRotations * 360.0f;  // 符号已在常量里
         vertical_target_degrees = targetDeg;
