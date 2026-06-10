@@ -29,17 +29,6 @@ constexpr int kVisionTxPin = 19;         // 视觉串口 TX (GPIO19, 接树莓�
 constexpr uint32_t kFreshDataGraceMs = 60;
 
 // ============================================================================
-// PID 视觉伺服参数 (机械臂角度轴和前后轴)
-// ============================================================================
-
-constexpr float kArmAngleKp = 30.0f;      // 角度轴 比例增益 P
-constexpr float kArmAngleKi = 0.5f;       // 角度轴 积分增益 I
-constexpr float kArmAngleKd = 5.0f;       // 角度轴 微分增益 D
-constexpr float kArmForwardKp = 30.0f;    // 前后轴 比例增益 P
-constexpr float kArmForwardKi = 0.5f;     // 前后轴 积分增益 I
-constexpr float kArmForwardKd = 5.0f;     // 前后轴 微分增益 D
-
-// ============================================================================
 // 全局对象指针 (在 setup() 中初始化)
 // ============================================================================
 
@@ -168,10 +157,8 @@ void setup() {
     stopChassis();
     stopArm();
 
-    // ---- 配置机械臂 PID 参数 ----
-    // 角度轴和前后轴使用相同的 PID 增益, 可根据实际调试效果分别调整
-    g_arm_control->setAnglePID(kArmAngleKp, kArmAngleKi, kArmAngleKd);
-    g_arm_control->setForwardPID(kArmForwardKp, kArmForwardKi, kArmForwardKd);
+    // 机械臂 PID 增益的权威默认值定义在 ArmControl 内 (现场标定值);
+    // 如需运行时改, 在此调用 g_arm_control->setAnglePID/setForwardPID 覆盖。
 
     Serial.println("Initialization complete");
 }
@@ -225,6 +212,7 @@ void loop() {
         g_last_fresh_input_ms = input.timestampMs;
         applyChassisCommand(input);   // 更新底盘速度
         delay(2);  // 底盘指令下发后短暂延迟, 确保 Serial2 总线有时间处理指令, 再下发机械臂指令
+        
         applyArmCommand(input);       // 更新机械臂控制 (视觉伺服 + 上下序列)
     } else if ((!g_is_stopped || g_task_coordinator->isActive()) &&
                (input.timestampMs - g_last_fresh_input_ms) > kFreshDataGraceMs) {
