@@ -45,7 +45,7 @@
 
 ## 位置控制（绝对角度）
 - `setPosition(address, deg)` — 通用位置控制，`X_generate_set_position_command`(0xFD) **原样下发不取负**
-    - 方向交给调用方：正角度→一个方向，负角度→反方向；速度 `kPosSpeed`
+    - 方向交给调用方：正角度→一个方向，负角度→反方向；速度按电机区分 `kVerticalPosSpeed`/`kForwardPosSpeed`/`kAnglePosSpeed`（`posSpeedFor(addr)` 选取）
 - `setVerticalPosition(deg)` / `setAnglePosition(deg)` / `setForwardPosition(deg)` — 三电机薄封装
     - [ ! ] 角度/前后电机平时 PID 速度控制；位置封装供 PRE_CATCH 摆位、阶段1 收臂归位用
 - `readPosition(address, out)` — 通用位置读取：问询 → 延迟 `kPositionReadDelayMs` 等回复 → 读响应；全程持锁为原子事务
