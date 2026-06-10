@@ -96,16 +96,18 @@ void applyChassisCommand(const InputState& input) {
 // 机械臂控制
 // ============================================================================
 
-/// @brief 将 A/X/B 三键状态转发给机械臂任务编排器
+/// @brief 将手柄按键与方向键转发给上层任务协调器
 /// @param input 手柄输入状态
-/// @note  两阶段 + 颜色队列模式:
-///        - A 键(阶段1): 请求误差1, 握手后记录一个物料颜色入队, 跑完整升降序列。每按一次记一个。
-///        - X 键(阶段2): 请求误差2, 按队列 FIFO 逐个颜色自动跑完所有升降序列。
-///        - B 键: 中止当前运行, 复位为 IDLE (队列保留)。
-///        - L1 键(阶段1前置): 空闲时角度电机预备摆位 (PRE_CATCH), 再按 A 进对准。
-///        上升沿触发, 序列自锁运行; A/X/B/L1 的边沿检测与队列逻辑封装在 ArmSequence。
+/// @note  两阶段模式 (放置流程已移到 TaskCoordinator):
+///        - A 键(阶段1): 视觉对准 + 夹取 + 收臂, 并由 TC 编排物料盘入仓 (store, count+1)。
+///        - X 键(阶段2): 纯手动逐步确认的放置流程 (出料), 每按一次推进一步。
+///        - B 键: 中止当前运行。
+///        - L1 键(阶段1前置): 空闲时角度电机预备摆位。
+///        - d-pad 上下左右: 放置流程手动瞄准 (左右→角度电机, 上下→前后电机)。
+///        边沿检测与流程逻辑封装在 TaskCoordinator / ArmSequence。
 void applyArmCommand(const InputState& input) {
-    g_task_coordinator->update(input.buttons.a, input.buttons.x, input.buttons.b, input.buttons.l1);
+    g_task_coordinator->update(input.buttons.a, input.buttons.x, input.buttons.b,
+                               input.buttons.l1, input.buttons.dpadX, input.buttons.dpadY);
 }
 
 }  // namespace
@@ -147,8 +149,8 @@ void setup() {
     // 初始化物料盘控制 (骨架; 与底盘/机械臂共用 Serial2 总线)
     g_tray_control = new TrayControl();
 
-    // 初始化上层协调器 (依赖 ArmSequence 与 TrayControl, 须在二者之后创建)
-    g_task_coordinator = new TaskCoordinator(g_arm_sequence, g_tray_control);
+    // 初始化上层协调器 (依赖 ArmControl / ArmSequence / TrayControl, 须在三者之后创建)
+    g_task_coordinator = new TaskCoordinator(g_arm_control, g_arm_sequence, g_tray_control);
 
     // ---- 初始化 Bluepad32 蓝牙手柄输入层 ----
     GamepadInput::begin();

@@ -2,32 +2,31 @@
 #include <Arduino.h>
 #include <ArmControl.h>
 #include <VisionSerial.h>
-#include <ColorQueue.h>
-#include <PlaceSequence.h>
 
 /**
- * @brief 机械臂高层任务编排: 阶段1(夹取) + 委托阶段2(放置) + 颜色队列
- * @note  阶段1 (A键夹取) 编排留在本类; 阶段2 (X键放置) 拆到 PlaceSequence。
+ * @brief 机械臂高层任务编排: 阶段1 (夹取 + 收臂归位)
+ * @note  阶段1 (A键夹取) 编排留在本类。阶段2 (X键放置) 已移到 TaskCoordinator,
+ *        本类不再持有 PlaceSequence / ColorQueue, 也不再处理 X 键。
  *        视觉对准复用 ArmControl 集成的对准接口 (beginAlign/updateAlign/...),
  *        本类不再直接持有 VisionSerial/握手。
  * @note  依赖注入: 构造传入已初始化的 ArmControl 指针, 本类不拥有其生命周期。
- * @note  对外接口不变: main/TaskCoordinator 仍调 update(a,x,b,l1)。
- * @note  == Version 3.0.0 ==
+ * @note  对外接口: main/TaskCoordinator 调 update(a,x,b,l1); x 参数已忽略 (放置移走)。
+ * @note  == Version 4.0.0 (color queue & placement removed) ==
  */
 class ArmSequence {
 private:
     // ========================================================================
     // 上下电机状态机 (阶段1: A键夹取, 收臂归位)
-    //   [PRE_CATCH(L1预备摆位)] → PRE_ALIGN(先降一小段+PID对准,等A确认)
-    //   → DESCENDING(位置下降到夹取位) → GRIPPING(舵机夹取+settle)
+    //   IDLE →[A或L1] PRE_CATCH(角度+前后预备摆位,等A) →[A] PRE_ALIGN(PID对准,等A确认)
+    //   →[A] DESCENDING(位置下降到夹取位) → GRIPPING(舵机夹取+settle)
     //   → STOW_LIFT_FORWARD(上下→0 + 前后→0 同时) → STOW_ANGLE(角度→0)
     //   → STOW_FORWARD_EXTEND(前后→-430伸出) → release放料 → [物料盘逻辑链] → IDLE
-    // 阶段2 (X键放置) 已拆到 PlaceSequence, 本类只在空闲时转发启动 + 运行期委托。
+    // 阶段2 (X键放置) 已移到 TaskCoordinator, 本类只编排阶段1。
     // ========================================================================
     enum VerticalState {
         IDLE,               // 空闲: 机械臂未在执行上下动作
-        PRE_CATCH,          // [前置] 预备摆位: 按 L1 后角度电机转到 kPreCatchAngleDeg, 等按 A
-        PRE_ALIGN,          // 对准等待: 上下已先降一小段, 角度+前后跑PID对准, 等第二次按 A
+        PRE_CATCH,          // [前置] 预备摆位: 按 A/L1 后角度+前后摆到预备位, 等再按 A
+        PRE_ALIGN,          // 对准等待: 角度+前后跑PID对准, 等再按 A 确认
         DESCENDING,         // 下降中: 位置控制到夹取位
         GRIPPING,           // 底部动作: 舵机夹取 + settle
         STOW_LIFT_FORWARD,  // [收臂] 步骤1: 上下→0 + 前后→0 同时, 轮询两轴到位
@@ -72,9 +71,6 @@ private:
     // ========================================================================
     ArmControl* arm = nullptr;        // 机械臂电机控制 + 集成视觉对准 (地址 5/6/7)
 
-    ColorQueue color_queue;           // 物料颜色待抓队列 (FIFO; 阶段1 入队, 阶段2 出队)
-    PlaceSequence place;              // 阶段2 放置序列 (委托; 共享 color_queue)
-
     // ========================================================================
     // 运行时状态 (阶段1)
     // ========================================================================
@@ -87,11 +83,9 @@ private:
     float forward_target_degrees = 0.0f;    // 前后电机收臂归位目标角度
     float angle_target_degrees = 0.0f;      // 角度电机收臂归位目标角度
     bool servo_stopped = false;             // 非串流位置控制期是否已停一次伺服
-    bool color_recorded_this_run = false;   // 本轮是否已记录过颜色, 防止重复入队
 
     // 触发边沿检测
     bool prev_a_pressed = false;            // 上一帧 A 键是否按住
-    bool prev_x_pressed = false;            // 上一帧 X 键是否按住
     bool prev_l1_pressed = false;           // 上一帧 L1 键是否按住
 
 public:
@@ -104,72 +98,49 @@ public:
      * @param arm 已初始化的机械臂控制对象指针 (含视觉对准)
      */
     explicit ArmSequence(ArmControl* arm)
-        : arm(arm), place(arm, &color_queue) {}
+        : arm(arm) {}
 
-    /// @brief 是否有动作正在运行 (阶段1 或阶段2; 供 main 安全判断)
-    bool isActive() const { return active || place.isActive(); }
-
-    /// @brief 当前颜色队列中待抓物料数量
-    uint8_t queuedColorCount() const { return color_queue.count(); }
+    /// @brief 阶段1 是否有动作正在运行 (供 main 安全判断)
+    bool isActive() const { return active; }
 
     /**
-     * @brief 每帧调用的主入口 (阶段1 编排 + 阶段2 委托 + 颜色队列)
-     * @param aPressed     A 键: 阶段1, 记录一个颜色入队并跑完整序列
-     * @param xPressed     X 键: 阶段2, 委托 PlaceSequence (启动 / 人工确认门)
+     * @brief 每帧调用的主入口 (阶段1 编排)
+     * @param aPressed     A 键: 阶段1 夹取 (对准确认 / 下降夹取)
+     * @param xPressed     X 键: 已忽略 (阶段2 放置移到 TaskCoordinator)
      * @param abortPressed B 键: 中止当前运行, 复位为 IDLE
      * @param l1Pressed    L1 键: 阶段1 前置, 空闲时角度电机预备摆位 (PRE_CATCH)
      */
     void update(bool aPressed, bool xPressed, bool abortPressed, bool l1Pressed) {
+        (void)xPressed;   // 放置已移走, X 不在本类处理
         const uint32_t currentTime = millis();
         bool aRising = aPressed && !prev_a_pressed;
-        bool xRising = xPressed && !prev_x_pressed;
         bool l1Rising = l1Pressed && !prev_l1_pressed;
-
-        // ---- 阶段2 运行期: 全权委托 PlaceSequence (阶段1 与阶段2 互斥) ----
-        if (place.isActive()) {
-            place.update(currentTime, xRising, abortPressed);
-            prev_a_pressed = aPressed;
-            prev_x_pressed = xPressed;
-            prev_l1_pressed = l1Pressed;
-            return;
-        }
 
         // ---- 阶段1 中止: 运行期按 B → 立即停止并复位 ----
         if (active && abortPressed) {
             Serial.println("Sequence aborted by user");
-            // 回滚: 本轮若已记颜色则丢弃, 并松开夹爪 (无论处于哪个子状态)。
-            // 必须在 stop() 之前: stop()→haltAndReset() 不碰队列, 但语义上先回滚。
-            if (color_recorded_this_run) {
-                color_queue.dropLast();
-                Serial.printf("Aborted: dropped recorded color, queue size = %u\n", color_queue.count());
-            }
             if (arm != nullptr) {
-                arm->release();
+                arm->release();   // 中止松开夹爪 (无论处于哪个子状态)
             }
             stop();
             prev_a_pressed = aPressed;
-            prev_x_pressed = xPressed;
             prev_l1_pressed = l1Pressed;
             return;
         }
 
-        // ---- 启动 (仅空闲时响应上升沿): A → 阶段1, X → 阶段2, L1 → 阶段1预备摆位 ----
+        // ---- 启动 (仅空闲时响应上升沿): A 或 L1 → 角度+前后摆到预备位 (PRE_CATCH) ----
         if (!active) {
-            if (aRising) {
-                startRecordSequence(currentTime);
-            } else if (xRising) {
-                place.tryStart(currentTime);   // 阶段2: 队空则不启动
-            } else if (l1Rising) {
+            if (aRising || l1Rising) {
                 startPreCatch(currentTime);
             }
         }
-        //阶段1: PRE_CATCH 期间按 A → 请求误差1并进入 PRE_ALIGN
+        //阶段1: PRE_CATCH 期间按 A (第2次) → 请求误差1并进入 PRE_ALIGN
         else if (state == PRE_CATCH && aRising) {
             Serial.println("[Stage 1] A-key: leaving pre-catch, entering pre-align");
             arm->beginAlign(1, kColorNone, currentTime);  // 请求误差1 + resetPID + 收敛清零
             enterPreAlign(currentTime);
         }
-        // PRE_ALIGN 期间按第二次 A → 仅当已收敛时确认并下降
+        // PRE_ALIGN 期间按 A (第3次) → 仅当已收敛时确认并下降
         else if (state == PRE_ALIGN && aRising) {
             if (arm->isAligned()) {
                 confirmAlignAndDescend(currentTime);
@@ -179,7 +150,6 @@ public:
         }
 
         prev_a_pressed = aPressed;
-        prev_x_pressed = xPressed;
         prev_l1_pressed = l1Pressed;
 
         // ---- 阶段1 自锁运行 ----
@@ -199,17 +169,11 @@ public:
     }
 
     /**
-     * @brief 立即停止所有机械臂电机并复位状态机 (阶段1 + 阶段2)
-     * @note  中止 / 紧急停止 / 手柄断连超时时调用。颜色队列保留。
+     * @brief 立即停止所有机械臂电机并复位状态机 (阶段1)
+     * @note  中止 / 紧急停止 / 手柄断连超时时调用。
      */
     void stop() {
-        place.stop();
         haltAndReset();
-    }
-
-    /// @brief 清空颜色队列 (供 main 在需要时手动复位任务)
-    void clearColorQueue() {
-        color_queue.clear();
     }
 
 private:
@@ -241,29 +205,18 @@ private:
     // ========================================================================
 
     /**
-     * @brief 阶段1启动 (A 键上升沿): 请求误差1, 握手后记录一个颜色, 跑完整升降序列
+     * @brief PRE_CATCH 预备摆位启动 (A 或 L1 上升沿, 仅空闲): 角度+前后摆到预备位, 等再按 A
      * @param currentTime 当前 millis() 时间戳
-     */
-    void startRecordSequence(uint32_t currentTime) {
-        active = true;
-        servo_stopped = false;
-        color_recorded_this_run = false;
-        Serial.println("[Stage 1] Record: requesting error1");
-        arm->beginAlign(1, kColorNone, currentTime);  // 请求误差1 + resetPID + 收敛清零
-         enterPreAlign(currentTime);
-    }
-
-    /**
-     * @brief PRE_CATCH 预备摆位启动 (L1 上升沿, 仅空闲): 角度电机转到预备角, 等按 A
-     * @param currentTime 当前 millis() 时间戳
-     * @note  前置步骤: 自锁但不开视觉、不跑 PID; 只发一次角度位置命令。
+     * @note  前置步骤: 自锁但不开视觉、不跑 PID; 角度+前后打包一次发出。
+     *        之后按第 2 次 A → 请求误差对准 (PRE_ALIGN), 第 3 次 A → 确认下降夹取。
      */
     void startPreCatch(uint32_t currentTime) {
         active = true;
         servo_stopped = false;
-        color_recorded_this_run = false;
-        Serial.printf("[Stage 1] Pre-catch: angle motor to %.1f deg, forward motor to %.1f deg, waiting for A\n",
+        Serial.printf("[Stage 1] Pre-catch: open gripper, angle motor to %.1f deg, forward motor to %.1f deg, waiting for A\n",
                       kPreCatchAngleDeg, kPreCatchForwardDeg);
+        arm->release();   // 预备位先张开夹爪 (3号舵机), 准备夹取
+        delay(2);         // 舵机命令与总线电机命令间留间隔
         // 角度+前后打包成一条长指令一次性下发 (同时摆位, 避免背靠背发送丢帧)
         arm->setAngleForwardPosition(kPreCatchAngleDeg, kPreCatchForwardDeg);
 
@@ -304,35 +257,22 @@ private:
     }
 
     /**
-     * @brief 本轮升降序列正常跑完后的收尾 (阶段1: 一轮记一个颜色, 跑完即结束)
+     * @brief 本轮升降序列正常跑完后的收尾 (阶段1 跑完即结束)
      * @param currentTime 当前 millis() 时间戳
      */
     void finishRun(uint32_t currentTime) {
+        (void)currentTime;
         haltMotors();  // 停本轮串流与电机
-        // 握手失败 → 整轮没记到颜色, 提示用户 (队列未增长)
-        if (!color_recorded_this_run) {
-            Serial.println("[Stage 1] WARNING: no color recorded this run (no vision data)");
-        }
         resetRunState();
     }
 
     /**
-     * @brief 视觉伺服一帧 (委托 arm->updateAlign) + 阶段1 记色入队
+     * @brief 视觉伺服一帧 (委托 arm->updateAlign)
      * @param currentTime 当前 millis() 时间戳
      * @note  收敛达标时打印 "[Stage 1] Aligned!" 提示, 等第二次按 A 由 update() 处理。
      */
     void runVisualServo(uint32_t currentTime) {
         ArmControl::AlignFrame f = arm->updateAlign(currentTime);
-
-        // 阶段1: 握手成功后记录本轮第一个颜色入队 (每轮只记一个)
-        if (f.freshFrame && !color_recorded_this_run) {
-            if (color_queue.enqueue(f.color)) {
-                Serial.printf("Recorded color %u, queue size = %u\n", f.color, color_queue.count());
-            } else {
-                Serial.println("WARNING: Color queue full, dropping color");
-            }
-            color_recorded_this_run = true;
-        }
 
         // 收敛达标提示 (仅 PRE_ALIGN 期, 提示一次按 A)
         if (state == PRE_ALIGN && f.converged) {

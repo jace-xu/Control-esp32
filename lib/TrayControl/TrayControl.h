@@ -452,3 +452,8 @@ private:
         ledcWrite(channel, duty);
     }
 };
+
+// static constexpr 数组成员的类外定义 (C++14 及以前要求): 运行时被 tightenAngleFor 按下标
+// 取值 (ODR-use), 需要这条定义提供存储, 否则链接报 "undefined reference"。本项目头文件仅被
+// main.cpp 单一翻译单元包含, 不存在重复定义问题。(C++17 起 static constexpr 隐含 inline 可省略。)
+constexpr float TrayControl::kTightenTable[10];
