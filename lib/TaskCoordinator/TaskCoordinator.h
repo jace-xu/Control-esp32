@@ -95,6 +95,8 @@ private:
     // X 键边沿检测 (放置流程自持, 与 ArmSequence 的边沿独立)
     bool prev_x_pressed = false;
 
+    uint32_t last_dbg_print = 0;      // 回位段位置轮询调试打印节流 (每秒一次)
+
 public:
     // 禁用拷贝和赋值
     TaskCoordinator(const TaskCoordinator&) = delete;
@@ -142,8 +144,16 @@ public:
             // 空闲且按 X 且仓非空 → 启动放置流程
             if (xRising && !isArmSeqActive() && tray != nullptr && tray->count() > 0) {
                 startPlacement(now);
-            } else if (xRising && tray != nullptr && tray->count() <= 0) {
-                Serial.println("[Place] tray empty, nothing to dispense");
+            } else if (xRising) {
+                // X 按了但没启动: 打印原因 (仓空 / 阶段1 仍忙 / tray 空指针)
+                if (isArmSeqActive()) {
+                    Serial.println("[Place] X ignored: stage1 (arm) still active");
+                } else if (tray == nullptr) {
+                    Serial.println("[Place] X ignored: tray is null");
+                } else {
+                    Serial.printf("[Place] X ignored: tray empty (count=%d), do stage1 (A) first\n",
+                                  tray->count());
+                }
             }
         }
 
@@ -345,23 +355,42 @@ private:
         }
     }
 
-    /// @brief 上下电机到位判定 (读位置且在阈值内)
+    /// @brief 上下电机到位判定 (读位置且在阈值内); 每秒打印一次轮询情况
     bool verticalArrived() {
         float p = 0.0f;
-        return arm->readVerticalPosition(p) &&
-               fabsf(p - kReturnVerticalDeg) <= kPositionArrivedThreshDeg;
+        bool ok = arm->readVerticalPosition(p);
+        dbgReturn("RET vertical", ok, p, kReturnVerticalDeg);
+        return ok && fabsf(p - kReturnVerticalDeg) <= kPositionArrivedThreshDeg;
     }
-    /// @brief 前后电机到位判定 (按当前 forward_target)
+    /// @brief 前后电机到位判定 (按当前 forward_target); 每秒打印一次轮询情况
     bool forwardArrived() {
         float p = 0.0f;
-        return arm->readForwardPosition(p) &&
-               fabsf(p - forward_target) <= kPositionArrivedThreshDeg;
+        bool ok = arm->readForwardPosition(p);
+        dbgReturn("RET forward", ok, p, forward_target);
+        return ok && fabsf(p - forward_target) <= kPositionArrivedThreshDeg;
     }
-    /// @brief 角度电机到位判定 (按当前 angle_target)
+    /// @brief 角度电机到位判定 (按当前 angle_target); 每秒打印一次轮询情况
     bool angleArrived() {
         float p = 0.0f;
-        return arm->readAnglePosition(p) &&
-               fabsf(p - angle_target) <= kPositionArrivedThreshDeg;
+        bool ok = arm->readAnglePosition(p);
+        dbgReturn("RET angle", ok, p, angle_target);
+        return ok && fabsf(p - angle_target) <= kPositionArrivedThreshDeg;
+    }
+
+    /// @brief 回位轮询调试打印 (节流 1s): 读成功与否 + 实际值 + 目标 + 误差
+    void dbgReturn(const char* tag, bool ok, float pos, float target) {
+        uint32_t now = millis();
+        if ((now - last_dbg_print) < 1000) {
+            return;
+        }
+        last_dbg_print = now;
+        if (ok) {
+            Serial.printf("[Place dbg] %s read OK pos=%.1f target=%.1f err=%.1f\n",
+                          tag, pos, target, fabsf(pos - target));
+        } else {
+            Serial.printf("[Place dbg] %s read FAILED (driver response off?) target=%.1f\n",
+                          tag, target);
+        }
     }
 
     /// @brief X 上升沿推进一步 (人确认上一步到位)

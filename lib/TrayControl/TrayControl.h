@@ -77,7 +77,7 @@ private:
     };
 
     static constexpr float kPosArrivedThreshDeg = 5.0f;    // 同步带到位判定阈值 (度)
-    static constexpr uint32_t kBeltMoveTimeoutMs = 15000;  // 同步带移动超时保护 (ms)
+    static constexpr uint32_t kBeltMoveMs = 2000;          // 同步带移动固定等待 (ms): 发命令后等够这段即视为到位 (闭环步进自行走到)
     static constexpr uint32_t kServoSettleMs = 500;        // 舵机动作 settle 等待 (ms), 待调
     static constexpr uint32_t kPositionReadDelayMs = 2;    // 读位置前等电机回复 (ms)
 
@@ -145,11 +145,12 @@ public:
     /**
      * @brief 同步带电机走到绝对角度 (位置控制)
      * @param deg 目标绝对角度 (度), 相对上电零点; 正=逆时针(让出出入口方向), 负=顺时针(推料/压紧方向)
-     * @note  发一次即可, 电机内部闭环走到位; 到位判定靠 readBeltAngle 轮询。
+     * @note  发一次即可, 电机内部闭环走到位; 上层按固定等待 kBeltMoveMs 判定 (不读位置)。
      */
     void beltRunToAngle(float deg) {
         this->control_serial->X_generate_set_position_command(kBeltAddr, deg, kBeltSpeed);
         this->control_serial->send_command();
+        delay(kPositionReadDelayMs);   // 发指令后留总线间隔, 防与同帧后续命令背靠背丢帧
     }
 
     /**
@@ -162,9 +163,10 @@ public:
     bool readBeltAngle(float& deg) {
         this->control_serial->thread_lock();
         this->control_serial->ask_current_position(kBeltAddr);
-        delay(kPositionReadDelayMs);
+        delay(kPositionReadDelayMs);   // 问询后等电机回复
         bool ok = this->control_serial->X_read_current_position(deg);
         this->control_serial->thread_unlock();
+        delay(kPositionReadDelayMs);   // 读完后留总线间隔, 防与同帧后续命令背靠背丢帧
         return ok;
     }
 
@@ -174,6 +176,7 @@ public:
         this->control_serial->generate_stop_command(kBeltAddr);
         this->control_serial->send_command();
         this->control_serial->thread_unlock();
+        delay(kPositionReadDelayMs);   // 发指令后留总线间隔
     }
 
     /// @brief 顶料舵机升起 (托高物料)
@@ -199,8 +202,10 @@ public:
      */
     void prepareStore() {
         if (state != IDLE) {
+            Serial.printf("[Tray] prepareStore IGNORED (state=%d, not IDLE)\n", state);
             return;
         }
+        Serial.printf("[Tray] prepareStore: lift up + belt retract -> %.1f\n", kEntryAngleDeg);
         liftUp();
         belt_target_deg = kEntryAngleDeg;   // 挡片退到负角, 让出入口空间
         beltRunToAngle(belt_target_deg);
@@ -214,8 +219,10 @@ public:
      */
     void store() {
         if (state != STORE_WAIT_PLACE) {
+            Serial.printf("[Tray] store IGNORED (state=%d, not WAIT_PLACE)\n", state);
             return;
         }
+        Serial.println("[Tray] store: lift down, then push in");
         liftDown();
         state = STORE_LIFT_DOWN;
         step_start_time = millis();
@@ -229,8 +236,10 @@ public:
      */
     void compact() {
         if (state != IDLE) {
+            Serial.printf("[Tray] compact IGNORED (state=%d, not IDLE)\n", state);
             return;
         }
+        Serial.printf("[Tray] compact: pre-move belt -> %.1f (count=%d)\n", kCompactPreDeg, material_count);
         belt_target_deg = kCompactPreDeg;   // 先转到前置位
         beltRunToAngle(belt_target_deg);
         state = COMPACT_PRE_MOVE;
@@ -246,8 +255,12 @@ public:
      */
     void dispense() {
         if (state != IDLE || material_count <= 0) {
+            Serial.printf("[Tray] dispense IGNORED (state=%d count=%d; need IDLE & count>0)\n",
+                          state, material_count);
             return;
         }
+        Serial.printf("[Tray] dispense: lift up (count=%d), belt target=%.1f\n",
+                      material_count, tightenAngleFor(material_count - 1));
         liftUp();
         belt_target_deg = tightenAngleFor(material_count - 1);
         state = DISP_LIFT_UP;
@@ -260,8 +273,10 @@ public:
      */
     void notifyPicked() {
         if (state != DISP_LIFT_UP) {
+            Serial.printf("[Tray] notifyPicked IGNORED (state=%d, not DISP_LIFT_UP)\n", state);
             return;
         }
+        Serial.println("[Tray] notifyPicked: lift down, then belt move to next");
         liftDown();
         state = DISP_LIFT_DOWN;
         step_start_time = millis();
@@ -296,22 +311,20 @@ public:
     /**
      * @brief 状态机推进一帧
      * @param now 当前 millis() 时间戳
-     * @note  等舵机 settle 用 now - step_start_time; 等同步带到位用 readBeltAngle 轮询;
-     *        同步带移动带超时保护, 超时强制停车回 IDLE。
+     * @note  等舵机 settle 用 now - step_start_time; 等同步带用固定时间 kBeltMoveMs (闭环步进自走到位);
+     *        舵机/带子均不读位置, 不阻塞。
      */
     void update(uint32_t now) {
         switch (state) {
             case IDLE:
                 break;
 
-            // ---- 入仓: 挡片退到入口负角, 到位 → 等机械臂放料 ----
+            // ---- 入仓: 挡片退到入口负角, 等够移动时间 → 等机械臂放料 ----
             case STORE_RETRACT:
-                if (beltArrived()) {
+                if (beltMoved(now)) {
                     state = STORE_WAIT_PLACE;
                     step_start_time = now;
-                } else if (timedOut(now, kBeltMoveTimeoutMs)) {
-                    Serial.println("ERROR: Tray store retract timeout! Stopping.");
-                    stop();
+                    Serial.println("[Tray] STORE_RETRACT done -> WAIT_PLACE (lift up, waiting arm place)");
                 }
                 break;
 
@@ -326,29 +339,26 @@ public:
                     beltRunToAngle(belt_target_deg);
                     state = STORE_PUSH;
                     step_start_time = now;
+                    Serial.printf("[Tray] STORE_LIFT_DOWN done -> STORE_PUSH belt->%.1f\n", belt_target_deg);
                 }
                 break;
 
-            // ---- 入仓: 同步带推进到位 → 计数+1 → 结束 ----
+            // ---- 入仓: 同步带推进等够时间 → 计数+1 → 结束 ----
             case STORE_PUSH:
-                if (beltArrived()) {
+                if (beltMoved(now)) {
                     material_count++;
                     state = IDLE;
-                } else if (timedOut(now, kBeltMoveTimeoutMs)) {
-                    Serial.println("ERROR: Tray store push timeout! Stopping.");
-                    stop();
+                    Serial.printf("[Tray] STORE_PUSH done -> IDLE, count=%d\n", material_count);
                 }
                 break;
 
-            // ---- 压紧: 挡片转到前置位, 到位 → 降挡板 ----
+            // ---- 压紧: 挡片转到前置位, 等够移动时间 → 降挡板 ----
             case COMPACT_PRE_MOVE:
-                if (beltArrived()) {
+                if (beltMoved(now)) {
                     baffleDown();
                     state = COMPACT_BAFFLE_DOWN;
                     step_start_time = now;
-                } else if (timedOut(now, kBeltMoveTimeoutMs)) {
-                    Serial.println("ERROR: Tray compact pre-move timeout! Stopping.");
-                    stop();
+                    Serial.println("[Tray] COMPACT_PRE_MOVE done -> baffle down");
                 }
                 break;
 
@@ -359,16 +369,15 @@ public:
                     beltRunToAngle(belt_target_deg);
                     state = COMPACT_PUSH;
                     step_start_time = now;
+                    Serial.printf("[Tray] COMPACT push belt->%.1f (count=%d)\n", belt_target_deg, material_count);
                 }
                 break;
 
-            // ---- 压紧: 同步带到位 → 结束 (挡板保持降下) ----
+            // ---- 压紧: 同步带等够移动时间 → 结束 (挡板保持降下) ----
             case COMPACT_PUSH:
-                if (beltArrived()) {
+                if (beltMoved(now)) {
                     state = IDLE;
-                } else if (timedOut(now, kBeltMoveTimeoutMs)) {
-                    Serial.println("ERROR: Tray compact push timeout! Stopping.");
-                    stop();
+                    Serial.println("[Tray] COMPACT done -> IDLE (baffle stays down)");
                 }
                 break;
 
@@ -382,19 +391,18 @@ public:
                     beltRunToAngle(belt_target_deg);
                     state = DISP_BELT_MOVE;
                     step_start_time = now;
+                    Serial.printf("[Tray] DISP belt->%.1f\n", belt_target_deg);
                 }
                 break;
 
-            // ---- 出仓: 同步带到位 → 计数-1 → 结束 ----
+            // ---- 出仓: 同步带等够移动时间 → 计数-1 → 结束 ----
             case DISP_BELT_MOVE:
-                if (beltArrived()) {
+                if (beltMoved(now)) {
                     if (material_count > 0) {
                         material_count--;
                     }
                     state = IDLE;
-                } else if (timedOut(now, kBeltMoveTimeoutMs)) {
-                    Serial.println("ERROR: Tray dispense belt-move timeout! Stopping.");
-                    stop();
+                    Serial.printf("[Tray] DISP done -> IDLE, count=%d\n", material_count);
                 }
                 break;
         }
@@ -428,11 +436,9 @@ private:
         return kTightenTable[n];
     }
 
-    /// @brief 同步带是否走到目标角度 (读位置且在阈值内)
-    bool beltArrived() {
-        float pos = 0.0f;
-        return readBeltAngle(pos) &&
-               fabsf(pos - belt_target_deg) <= kPosArrivedThreshDeg;
+    /// @brief 同步带是否已等够移动时间 (闭环步进发命令后, 等 kBeltMoveMs 即视为到位, 不读位置)
+    bool beltMoved(uint32_t now) const {
+        return (now - step_start_time) >= kBeltMoveMs;
     }
 
 private:

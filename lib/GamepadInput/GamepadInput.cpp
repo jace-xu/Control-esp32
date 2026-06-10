@@ -17,6 +17,12 @@ constexpr uint8_t kAllowedControllerBtAddr[6] = {0x40, 0xE4, 0x04, 0x18, 0x5F, 0
 
 uint32_t g_lastControllerDataMs = 0;
 
+// 上一帧真实输入缓存: Bluepad32 hasData()=false 时沿用, 保证按键边沿检测每帧有真实当前值。
+ButtonState g_lastButtons;
+StickState g_lastSticks;
+TriggerState g_lastTriggers;
+bool g_hasCachedInput = false;
+
 float normalizeAxis(int raw) {
     // 对称钳位到 [-511, 511] 并除以 511,使正负向都能达到 ±1.0。
     // (摇杆原始范围约为 [-512, 511],直接除以 512 会导致正向最大仅 0.998、负向 -1.0 的不对称)
@@ -195,6 +201,11 @@ InputState read() {
 
     ControllerPtr activeController = getActiveController();
     if (activeController == nullptr) {
+        // 控制器断开: 清掉缓存的按键状态, 防止重连后用旧值误触发边沿
+        g_lastButtons = ButtonState();
+        g_lastSticks = StickState();
+        g_lastTriggers = TriggerState();
+        g_hasCachedInput = false;
         return state;
     }
 
@@ -207,8 +218,24 @@ InputState read() {
         fillButtons(activeController, state);
         fillChassisCommand(state);
         fillArmCommand(state);
+        // 缓存本帧真实输入, 供无新数据帧沿用 (保证按键边沿检测每帧都有真实当前值)
+        g_lastButtons = state.buttons;
+        g_lastSticks = state.sticks;
+        g_lastTriggers = state.triggers;
+        g_hasCachedInput = true;
         printDebug(state);
         return state;
+    }
+
+    // 无新数据帧: 沿用上一帧缓存的真实按键/摇杆状态 (Bluepad32 hasData()=false 不代表键松开)。
+    // 这样按键边沿检测 (aRising 等) 不会因漏帧丢失或误判, 但 hasFreshData 仍为 false,
+    // 供 main 区分 "底盘速度是否更新" 与 "超时判断"。
+    if (g_hasCachedInput) {
+        state.buttons = g_lastButtons;
+        state.sticks = g_lastSticks;
+        state.triggers = g_lastTriggers;
+        fillChassisCommand(state);
+        fillArmCommand(state);
     }
 
     if ((state.timestampMs - g_lastControllerDataMs) > kControllerTimeoutMs) {

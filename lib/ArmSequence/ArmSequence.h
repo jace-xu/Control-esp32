@@ -88,6 +88,8 @@ private:
     bool prev_a_pressed = false;            // 上一帧 A 键是否按住
     bool prev_l1_pressed = false;           // 上一帧 L1 键是否按住
 
+    uint32_t last_dbg_print = 0;            // 调试打印节流时间戳 (每秒一次)
+
 public:
     // 禁用拷贝和赋值
     ArmSequence(const ArmSequence&) = delete;
@@ -285,6 +287,24 @@ private:
     }
 
     /**
+     * @brief 调试: 每秒打印一次单轴位置轮询情况 (读成功与否 + 实际值 + 目标 + 误差)
+     * @note  排查"读不到位置"还是"位置不对"导致的卡住/超时; 节流 1s 防刷屏。
+     */
+    void dbgAxis(uint32_t now, const char* tag, bool ok, float pos, float target) {
+        if ((now - last_dbg_print) < 1000) {
+            return;
+        }
+        last_dbg_print = now;
+        if (ok) {
+            Serial.printf("[Stage1 dbg] %s read OK pos=%.1f target=%.1f err=%.1f\n",
+                          tag, pos, target, fabsf(pos - target));
+        } else {
+            Serial.printf("[Stage1 dbg] %s read FAILED (driver response off?) target=%.1f\n",
+                          tag, target);
+        }
+    }
+
+    /**
      * @brief 阶段1 上下电机自动序列状态机
      *        PRE_CATCH → PRE_ALIGN → DESCENDING → GRIPPING
      *        → STOW_LIFT_FORWARD → STOW_ANGLE → STOW_FORWARD_EXTEND → release → IDLE
@@ -314,7 +334,9 @@ private:
             // ---- DESCENDING: 位置控制下降到夹取位, 位置反馈轮询到位 ----
             case DESCENDING: {
                 float currentPos = 0.0f;
-                if (arm->readVerticalPosition(currentPos)) {
+                bool ok = arm->readVerticalPosition(currentPos);
+                dbgAxis(currentTime, "DESCENDING vertical", ok, currentPos, vertical_target_degrees);
+                if (ok) {
                     if (fabsf(currentPos - vertical_target_degrees) <= kPositionArrivedThreshDeg) {
                         Serial.printf("Descent complete (pos=%.1f), gripping\n", currentPos);
                         arm->grip();    // 到位夹紧物料
@@ -346,10 +368,15 @@ private:
             // ---- STOW_LIFT_FORWARD (收臂步骤1): 上下+前后同时归位, 两轴都到位才进下一步 ----
             case STOW_LIFT_FORWARD: {
                 float vPos = 0.0f, fPos = 0.0f;
-                bool vArrived = arm->readVerticalPosition(vPos) &&
-                                fabsf(vPos - vertical_target_degrees) <= kPositionArrivedThreshDeg;
-                bool fArrived = arm->readForwardPosition(fPos) &&
-                                fabsf(fPos - forward_target_degrees) <= kPositionArrivedThreshDeg;
+                bool vOk = arm->readVerticalPosition(vPos);
+                bool fOk = arm->readForwardPosition(fPos);
+                if ((currentTime - last_dbg_print) >= 1000) {
+                    last_dbg_print = currentTime;
+                    Serial.printf("[Stage1 dbg] STOW1 vert(ok=%d pos=%.1f tgt=%.1f) fwd(ok=%d pos=%.1f tgt=%.1f)\n",
+                                  vOk, vPos, vertical_target_degrees, fOk, fPos, forward_target_degrees);
+                }
+                bool vArrived = vOk && fabsf(vPos - vertical_target_degrees) <= kPositionArrivedThreshDeg;
+                bool fArrived = fOk && fabsf(fPos - forward_target_degrees) <= kPositionArrivedThreshDeg;
                 if (vArrived && fArrived) {
                     Serial.println("Stow step1 done, stow step2: angle homing");
                     angle_target_degrees = kStowAngleDeg;
@@ -367,7 +394,9 @@ private:
             // ---- STOW_ANGLE (收臂步骤2): 角度电机→0, 到位后进步骤3 (前后伸出) ----
             case STOW_ANGLE: {
                 float aPos = 0.0f;
-                if (arm->readAnglePosition(aPos)) {
+                bool ok = arm->readAnglePosition(aPos);
+                dbgAxis(currentTime, "STOW_ANGLE angle", ok, aPos, angle_target_degrees);
+                if (ok) {
                     if (fabsf(aPos - angle_target_degrees) <= kPositionArrivedThreshDeg) {
                         Serial.printf("Stow step2 done, stow step3: forward extend→%.1f\n", kStowForwardExtendDeg);
                         forward_target_degrees = kStowForwardExtendDeg;
@@ -386,7 +415,9 @@ private:
             // ---- STOW_FORWARD_EXTEND (收臂步骤3): 前后伸出到位 → release 放料 → [物料盘逻辑链] → 结束 ----
             case STOW_FORWARD_EXTEND: {
                 float fPos = 0.0f;
-                if (arm->readForwardPosition(fPos)) {
+                bool ok = arm->readForwardPosition(fPos);
+                dbgAxis(currentTime, "STOW_EXTEND forward", ok, fPos, forward_target_degrees);
+                if (ok) {
                     if (fabsf(fPos - forward_target_degrees) <= kPositionArrivedThreshDeg) {
                         Serial.printf("Stow step3 done (pos=%.1f), releasing\n", fPos);
                         arm->release();   // 前后伸出到位, 松爪放下物料

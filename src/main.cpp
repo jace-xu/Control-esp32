@@ -207,20 +207,23 @@ void loop() {
     g_timeout_reported = false;
 
     // ---- 情况 3: 有有效手柄连接且数据未超时 ----
-    // hasFreshData == true:  当前帧有新的手柄数据 → 下发控制指令
-    // hasFreshData == false: 当前帧无新数据但未超时 → 宽限期后清零停止,
-    //                        防止沿用上一帧的速度值继续运动
+    // 机械臂/任务协调器: 每帧都更新。按键边沿检测 (aRising 等) 和状态机推进
+    // (DESCENDING 轮询、物料盘 update、放置流程) 都依赖每帧调用; 漏帧会丢边沿/卡状态。
+    // GamepadInput 在无新数据帧时已沿用上一帧真实按键值, 故此处用的按键状态始终有效。
+    //
+    // 底盘速度: 仅在有新数据帧时下发; 无新数据超过宽限期则清零停车 (防沿用旧速度持续运动)。
     if (input.hasFreshData) {
         g_last_fresh_input_ms = input.timestampMs;
         applyChassisCommand(input);   // 更新底盘速度
         delay(2);  // 底盘指令下发后短暂延迟, 确保 Serial2 总线有时间处理指令, 再下发机械臂指令
-        
-        applyArmCommand(input);       // 更新机械臂控制 (视觉伺服 + 上下序列)
-    } else if ((!g_is_stopped || g_task_coordinator->isActive()) &&
+    } else if (!g_is_stopped &&
                (input.timestampMs - g_last_fresh_input_ms) > kFreshDataGraceMs) {
-        // 超过宽限期仍无新数据: 同时停止底盘和机械臂
-        safetyStopAll();
+        // 超过宽限期仍无新底盘数据: 仅停底盘 (机械臂序列继续, 不被打断)
+        stopChassis();
+        delay(2);
     }
+
+    applyArmCommand(input);   // 机械臂/任务协调器: 每帧推进 (按键边沿 + 状态机)
 
     // 主循环延迟 20ms, 控制频率约 50Hz
     delay(20);
