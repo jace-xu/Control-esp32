@@ -31,7 +31,7 @@ private:
         GRIPPING,           // 底部动作: 舵机夹取 + settle
         STOW_LIFT_FORWARD,  // [收臂] 步骤1: 上下→0 + 前后→0 同时, 轮询两轴到位
         STOW_ANGLE,         // [收臂] 步骤2: 角度电机→0, 轮询到位
-        STOW_FORWARD_EXTEND,// [收臂] 步骤3: 前后电机伸出到 -430, 到位后 release 放料
+        STOW_FORWARD_EXTEND,// [收臂] 步骤3: 前后电机伸出到 430, 到位后 release 放料
     };
 
     // ========================================================================
@@ -49,7 +49,7 @@ private:
     static constexpr float kStowVerticalHomeDeg = 0.0f;    // 步骤1 上下电机归位绝对角 (0 位)
     static constexpr float kStowForwardHomeDeg = 0.0f;     // 步骤1 前后电机归位绝对角 (0 位)
     static constexpr float kStowAngleDeg = 0.0f;           // 步骤2 角度电机归位绝对角 (0 位)
-    static constexpr float kStowForwardExtendDeg = -430.0f;// 步骤3 前后电机伸出绝对角 (放料位)
+    static constexpr float kStowForwardExtendDeg = 430.0f;// 步骤3 前后电机伸出绝对角 (放料位)
 
     // 超时保护 (位置反馈失败/电机卡死时强制停止)
     static constexpr uint32_t kDescentTimeoutMs = 15000; // 下降超时保护: 15 秒
@@ -83,6 +83,7 @@ private:
     float forward_target_degrees = 0.0f;    // 前后电机收臂归位目标角度
     float angle_target_degrees = 0.0f;      // 角度电机收臂归位目标角度
     bool servo_stopped = false;             // 非串流位置控制期是否已停一次伺服
+    bool completed_normally = false;        // 本轮是否跑到自然终点 (finishRun); 供入仓握手区分"成功"与"超时/中止"
 
     // 触发边沿检测
     bool prev_a_pressed = false;            // 上一帧 A 键是否按住
@@ -102,6 +103,11 @@ public:
 
     /// @brief 阶段1 是否有动作正在运行 (供 main 安全判断)
     bool isActive() const { return active; }
+
+    /// @brief 上一轮阶段1 是否跑到自然终点 (release 放料后 finishRun)
+    /// @note  供入仓握手在 active→idle 下降沿区分: true=正常完成可 store(count+1),
+    ///        false=被超时/中止/急停强停, 不应记入仓。startPreCatch 启动时清零。
+    bool completedNormally() const { return completed_normally; }
 
     /**
      * @brief 每帧调用的主入口 (阶段1 编排)
@@ -213,6 +219,7 @@ private:
     void startPreCatch(uint32_t currentTime) {
         active = true;
         servo_stopped = false;
+        completed_normally = false;   // 新一轮开始: 清成功标志, 只有跑到 finishRun 才置回 true
         Serial.printf("[Stage 1] Pre-catch: open gripper, angle motor to %.1f deg, forward motor to %.1f deg, waiting for A\n",
                       kPreCatchAngleDeg, kPreCatchForwardDeg);
         arm->release();   // 预备位先张开夹爪 (3号舵机), 准备夹取
@@ -254,6 +261,11 @@ private:
         arm->setVerticalPosition(targetDeg);
         state = DESCENDING;
         descent_start_time = currentTime;
+        // [ ! ] 本帧已亲自停过伺服, 标记 servo_stopped 以免 update() 的 active 块紧接着
+        //       又发一条 stopServo(), 那会 0 间隔贴在刚发的下降命令(0xFD)后把它挤掉/错帧
+        //       → 6号电机收不到下降命令而不动, 进而 DESCENDING 永不到位、熬到超时。
+        servo_stopped = true;
+        delay(2);   // 与本帧随后 DESCENDING 首次轮询的 ask_current_position 隔开, 同理防丢命令
     }
 
     /**
@@ -262,6 +274,7 @@ private:
      */
     void finishRun(uint32_t currentTime) {
         (void)currentTime;
+        completed_normally = true;   // 跑到自然终点: 供入仓握手判定"正常完成", 可 store(count+1)
         haltMotors();  // 停本轮串流与电机
         resetRunState();
     }

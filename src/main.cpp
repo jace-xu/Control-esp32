@@ -207,19 +207,26 @@ void loop() {
     g_timeout_reported = false;
 
     // ---- 情况 3: 有有效手柄连接且数据未超时 ----
-    // hasFreshData == true:  当前帧有新的手柄数据 → 下发控制指令
-    // hasFreshData == false: 当前帧无新数据但未超时 → 宽限期后清零停止,
-    //                        防止沿用上一帧的速度值继续运动
+    // hasFreshData == true:  当前帧有新的手柄数据 → 下发底盘速度 + 转发机械臂按键
+    // hasFreshData == false: 当前帧无新数据但未超时 (人松手静等, 非断流) →
+    //                        底盘速度清零防误冲, 但机械臂/物料盘状态机仍每帧推进:
+    //                        阶段1 "按一下→静等→再按一下" 的多步交互、物料盘到位轮询、
+    //                        各自的超时判定都依赖每帧 tick, 不能在静等期停掉。
+    //                        机械臂真正的断连安全由上面 timedOut(250ms) 与 !connected 兜底。
     if (input.hasFreshData) {
         g_last_fresh_input_ms = input.timestampMs;
         applyChassisCommand(input);   // 更新底盘速度
         delay(2);  // 底盘指令下发后短暂延迟, 确保 Serial2 总线有时间处理指令, 再下发机械臂指令
-        
+
         applyArmCommand(input);       // 更新机械臂控制 (视觉伺服 + 上下序列)
-    } else if ((!g_is_stopped || g_task_coordinator->isActive()) &&
-               (input.timestampMs - g_last_fresh_input_ms) > kFreshDataGraceMs) {
-        // 超过宽限期仍无新数据: 同时停止底盘和机械臂
-        safetyStopAll();
+    } else {
+        // 无新数据宽限期到 → 仅清底盘速度 (防沿用上帧速度续冲); 不停机械臂
+        if (!g_is_stopped &&
+            (input.timestampMs - g_last_fresh_input_ms) > kFreshDataGraceMs) {
+            stopChassis();
+        }
+        // 机械臂/物料盘状态机照常推进 (input 按键为默认全松开, 不产生误上升沿)
+        applyArmCommand(input);
     }
 
     // 主循环延迟 20ms, 控制频率约 50Hz

@@ -207,7 +207,7 @@ InputState read() {
         fillButtons(activeController, state);
         fillChassisCommand(state);
         fillArmCommand(state);
-        printDebug(state);
+        // printDebug(state);   // 手柄命令调试刷屏, 平时关闭; 需要时取消注释
         return state;
     }
 
