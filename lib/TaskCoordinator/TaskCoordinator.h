@@ -136,9 +136,10 @@ public:
             if (arm_seq != nullptr) {
                 arm_seq->update(aPressed, false, abortPressed, l1Pressed);
             }
+            delay(kBusDelayMs);
             // 阶段1 入仓握手: 监测 arm_seq 忙闲边沿
             handleStoreHandshake(abortPressed);
-
+            delay(kBusDelayMs); // 同帧两段逻辑间隔 (防总线冲突)
             // 空闲且按 X 且仓非空 → 启动放置流程
             if (xRising && !isArmSeqActive() && tray != nullptr && tray->count() > 0) {
                 startPlacement(now);
@@ -148,8 +149,11 @@ public:
         }
 
         // ---- 物料盘状态机每帧推进 (非阻塞) ----
+        // [ ! ] 必须用当前 millis(), 不能复用帧开头的 now: 本帧 prepareStore() 用更晚的
+        //       millis() 盖了 step_start_time, 若传旧 now 则 (now - step_start_time) 无符号
+        //       下溢成巨值 → 第一帧即误判超时 → 刚发的带子命令被 stop() 当帧刹停。
         if (tray != nullptr) {
-            tray->update(now);
+            tray->update(millis());
         }
 
         prev_x_pressed = xPressed;
@@ -196,18 +200,23 @@ private:
         // 上升沿: 阶段1 刚启动 → 准备承接 (顶料升起 + 挡片退到入口位)
         if (active && !prev_arm_seq_active) {
             Serial.println("[Store] stage1 started, prepareStore()");
+            delay(kBusDelayMs);   // 与本帧刚发出的 PRE_CATCH 角度/前后命令隔开, 防总线丢命令
             tray->prepareStore();
         }
         // 下降沿: 阶段1 刚结束
         else if (!active && prev_arm_seq_active) {
-            if (abortPressed) {
-                // 中止收尾: 取消本次入仓 (count 不增)
-                Serial.println("[Store] stage1 aborted, cancel store");
-                tray->stop();
-            } else {
+            // [ ! ] 只看 abortPressed 不够: 下降/收臂超时、急停等也会让 arm_seq 从 active 落回
+            //       idle, 但那不是"正常完成", 不应记入仓。改以 arm_seq 是否跑到自然终点
+            //       (release 放料后 finishRun) 为准。abort 当帧 completedNormally 仍为 false。
+            const bool ok = arm_seq != nullptr && arm_seq->completedNormally();
+            if (ok && !abortPressed) {
                 // 正常结束: 落下 + 推进 + count+1
                 Serial.println("[Store] stage1 done, store() count+1");
                 tray->store();
+            } else {
+                // 超时/出错/中止收尾: 取消本次入仓 (count 不增)
+                Serial.println("[Store] stage1 ended without normal completion, cancel store");
+                tray->stop();
             }
         }
 
