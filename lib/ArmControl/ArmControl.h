@@ -82,8 +82,18 @@ private:
     // Anti-windup limits (防止积分饱和)
     float integral_limit = 1000.0f;        // 积分项限制
 
-    // 电机位置移动速度 (rpm), setPosition 时使用 (角度/上下电机共用)
-    static constexpr float kPosSpeed = 15.0f;
+    // 电机位置移动速度 (rpm), setPosition 时使用 (按电机区分)
+    static constexpr float kVerticalPosSpeed = 800.0f;  // 上下电机位置速度
+    static constexpr float kForwardPosSpeed = 120.0f;   // 前后电机位置速度
+    static constexpr float kAnglePosSpeed = 15.0f;      // 角度电机位置速度
+
+    /// @brief 按电机地址返回其位置移动速度 (rpm)
+    /// @note  地址未知时回退到角度电机速度 (最慢, 最保守)
+    static constexpr float posSpeedFor(int address) {
+        return address == kVerticalAddr ? kVerticalPosSpeed
+             : address == kForwardAddr  ? kForwardPosSpeed
+             :                            kAnglePosSpeed;
+    }
 
     // 位置问询后等待电机回复的时间 (ms), readVerticalPosition 时使用
     // 给电机收到问询、处理、回 8 字节的往返留出时间, 否则 read 会提前超时
@@ -145,12 +155,14 @@ public:
     /// @note Also resets PID state so a later servo session starts clean.
     void stop() {
         this->control_serial->thread_lock();
+        this->control_serial->clear_long_command();
         this->control_serial->generate_stop_command(kAngleAddr);
-        this->control_serial->send_command();
+        this->control_serial->append_command();
         this->control_serial->generate_stop_command(kVerticalAddr);
-        this->control_serial->send_command();
+        this->control_serial->append_command();
         this->control_serial->generate_stop_command(kForwardAddr);
-        this->control_serial->send_command();
+        this->control_serial->append_command();
+        this->control_serial->send_long_command();
         this->control_serial->thread_unlock();
         resetPID();
     }
@@ -160,10 +172,12 @@ public:
     ///       Vertical motor is speed-controlled and not affected by resetPID().
     void stopServo() {
         this->control_serial->thread_lock();
+        this->control_serial->clear_long_command();
         this->control_serial->generate_stop_command(kAngleAddr);
-        this->control_serial->send_command();
+        this->control_serial->append_command();
         this->control_serial->generate_stop_command(kForwardAddr);
-        this->control_serial->send_command();
+        this->control_serial->append_command();
+        this->control_serial->send_long_command();
         this->control_serial->thread_unlock();
         resetPID();
     }
@@ -286,7 +300,7 @@ public:
      */
     void setPosition(int address, float positionDegrees) {
         this->control_serial->X_generate_set_position_command(
-            address, positionDegrees, kPosSpeed);
+            address, positionDegrees, posSpeedFor(address));
         this->control_serial->send_command();
     }
 
@@ -321,11 +335,35 @@ public:
         this->control_serial->clear_long_command();
         // 角度电机子命令: 构造到 command 缓冲后追加进长指令
         this->control_serial->X_generate_set_position_command(
-            kAngleAddr, angleDegrees, kPosSpeed);
+            kAngleAddr, angleDegrees, posSpeedFor(kAngleAddr));
         this->control_serial->append_command();
         // 前后电机子命令
         this->control_serial->X_generate_set_position_command(
-            kForwardAddr, forwardDegrees, kPosSpeed);
+            kForwardAddr, forwardDegrees, posSpeedFor(kForwardAddr));
+        this->control_serial->append_command();
+        this->control_serial->send_long_command();
+        this->control_serial->thread_unlock();
+    }
+
+    /**
+     * @brief 上下+前后两个电机位置命令打包成一条长指令一次性下发
+     * @param verticalDegrees 上下电机目标绝对角 (度)
+     * @param forwardDegrees  前后电机目标绝对角 (度)
+     * @note  两条 0xFD 位置子命令拼进同一个长指令帧 (0xAA 头), 单次 Serial2 写出,
+     *        避免两条命令背靠背发送时的帧间隔/丢帧问题。
+     * @note  全程持递归锁为原子事务, 防其他线程在拼帧期间插命令。
+     * @note  供阶段1 收臂步骤1 使用 (上下+前后同时归位)。
+     */
+    void setVerticalForwardPosition(float verticalDegrees, float forwardDegrees) {
+        this->control_serial->thread_lock();
+        this->control_serial->clear_long_command();
+        // 上下电机子命令: 构造到 command 缓冲后追加进长指令
+        this->control_serial->X_generate_set_position_command(
+            kVerticalAddr, verticalDegrees, posSpeedFor(kVerticalAddr));
+        this->control_serial->append_command();
+        // 前后电机子命令
+        this->control_serial->X_generate_set_position_command(
+            kForwardAddr, forwardDegrees, posSpeedFor(kForwardAddr));
         this->control_serial->append_command();
         this->control_serial->send_long_command();
         this->control_serial->thread_unlock();

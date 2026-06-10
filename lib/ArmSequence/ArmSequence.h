@@ -20,19 +20,19 @@ private:
     // 上下电机状态机 (阶段1: A键夹取, 收臂归位)
     //   [PRE_CATCH(L1预备摆位)] → PRE_ALIGN(先降一小段+PID对准,等A确认)
     //   → DESCENDING(位置下降到夹取位) → GRIPPING(舵机夹取+settle)
-    //   → STOW_LIFT_FORWARD(上下+前后归位) → STOW_ANGLE(角度归位) → STOW_DESCEND(上下再降)
-    //   → release放料 → IDLE
+    //   → STOW_LIFT_FORWARD(上下→0 + 前后→0 同时) → STOW_ANGLE(角度→0)
+    //   → STOW_FORWARD_EXTEND(前后→-430伸出) → release放料 → [物料盘逻辑链] → IDLE
     // 阶段2 (X键放置) 已拆到 PlaceSequence, 本类只在空闲时转发启动 + 运行期委托。
     // ========================================================================
     enum VerticalState {
-        IDLE,              // 空闲: 机械臂未在执行上下动作
-        PRE_CATCH,         // [前置] 预备摆位: 按 L1 后角度电机转到 kPreCatchAngleDeg, 等按 A
-        PRE_ALIGN,         // 对准等待: 上下已先降一小段, 角度+前后跑PID对准, 等第二次按 A
-        DESCENDING,        // 下降中: 位置控制到夹取位
-        GRIPPING,          // 底部动作: 舵机夹取 + settle
-        STOW_LIFT_FORWARD, // [收臂] 步骤1: 上下+前后电机同时归位, 轮询两轴到位
-        STOW_ANGLE,        // [收臂] 步骤2: 角度电机归位, 轮询到位
-        STOW_DESCEND,      // [收臂] 步骤3: 上下电机再下降, 到位后 release 放料
+        IDLE,               // 空闲: 机械臂未在执行上下动作
+        PRE_CATCH,          // [前置] 预备摆位: 按 L1 后角度电机转到 kPreCatchAngleDeg, 等按 A
+        PRE_ALIGN,          // 对准等待: 上下已先降一小段, 角度+前后跑PID对准, 等第二次按 A
+        DESCENDING,         // 下降中: 位置控制到夹取位
+        GRIPPING,           // 底部动作: 舵机夹取 + settle
+        STOW_LIFT_FORWARD,  // [收臂] 步骤1: 上下→0 + 前后→0 同时, 轮询两轴到位
+        STOW_ANGLE,         // [收臂] 步骤2: 角度电机→0, 轮询到位
+        STOW_FORWARD_EXTEND,// [收臂] 步骤3: 前后电机伸出到 -430, 到位后 release 放料
     };
 
     // ========================================================================
@@ -46,10 +46,11 @@ private:
     static constexpr float kDescendTargetRotations = 5.0f*kVerticalDirection;  // 下降到夹取位: 5 圈
 
     // 夹取后收臂归位目标 (占位, 现场校准; 圈数带符号同方向因子约定)
-    static constexpr float kStowLiftRotations = 1.0f*kVerticalDirection;   // 步骤1 上下电机归位圈数
-    static constexpr float kStowForwardDeg = 0.0f;                          // 步骤1 前后电机归位绝对角 (占位)
-    static constexpr float kStowAngleDeg = 0.0f;                            // 步骤2 角度电机归位绝对角 (占位)
-    static constexpr float kFinalDescendRotations = 3.0f*kVerticalDirection;// 步骤3 上下电机再下降圈数 (放料高度)
+    // 步骤1: 上下→0 + 前后→0 同时; 步骤2: 角度→0; 步骤3: 前后伸出到 kStowForwardExtendDeg
+    static constexpr float kStowVerticalHomeDeg = 0.0f;    // 步骤1 上下电机归位绝对角 (0 位)
+    static constexpr float kStowForwardHomeDeg = 0.0f;     // 步骤1 前后电机归位绝对角 (0 位)
+    static constexpr float kStowAngleDeg = 0.0f;           // 步骤2 角度电机归位绝对角 (0 位)
+    static constexpr float kStowForwardExtendDeg = -430.0f;// 步骤3 前后电机伸出绝对角 (放料位)
 
     // 超时保护 (位置反馈失败/电机卡死时强制停止)
     static constexpr uint32_t kDescentTimeoutMs = 15000; // 下降超时保护: 15 秒
@@ -188,7 +189,7 @@ public:
                 runVisualServo(currentTime);
                 servo_stopped = false;
             } else if ((state == DESCENDING || state == STOW_LIFT_FORWARD ||
-                        state == STOW_ANGLE || state == STOW_DESCEND) && !servo_stopped) {
+                        state == STOW_ANGLE || state == STOW_FORWARD_EXTEND) && !servo_stopped) {
                 // 非串流位置控制期停一次伺服 (排除 PRE_CATCH/PRE_ALIGN)。
                 arm->stopServo();
                 servo_stopped = true;
@@ -346,7 +347,7 @@ private:
     /**
      * @brief 阶段1 上下电机自动序列状态机
      *        PRE_CATCH → PRE_ALIGN → DESCENDING → GRIPPING
-     *        → STOW_LIFT_FORWARD → STOW_ANGLE → STOW_DESCEND → IDLE
+     *        → STOW_LIFT_FORWARD → STOW_ANGLE → STOW_FORWARD_EXTEND → release → IDLE
      * @param currentTime 当前 millis() 时间戳
      */
     void runVerticalSequence(uint32_t currentTime) {
@@ -388,16 +389,14 @@ private:
                 break;
             }
 
-            // ---- GRIPPING: 夹取 settle 后进收臂归位步骤1 ----
+            // ---- GRIPPING: 夹取 settle 后进收臂归位步骤1 (上下→0 + 前后→0) ----
             case GRIPPING: {
                 if ((currentTime - grip_start_time) >= kGripSettleMs) {
-                    float vDeg = kStowLiftRotations * 360.0f;
-                    vertical_target_degrees = vDeg;
-                    forward_target_degrees = kStowForwardDeg;
+                    vertical_target_degrees = kStowVerticalHomeDeg;
+                    forward_target_degrees = kStowForwardHomeDeg;
                     Serial.printf("Grip done (%lums), stow step1: vertical→%.1f, forward→%.1f\n",
-                                  (unsigned long)kGripSettleMs, vDeg, kStowForwardDeg);
-                    arm->setVerticalPosition(vDeg);
-                    arm->setForwardPosition(kStowForwardDeg);
+                                  (unsigned long)kGripSettleMs, kStowVerticalHomeDeg, kStowForwardHomeDeg);
+                    arm->setVerticalForwardPosition(kStowVerticalHomeDeg, kStowForwardHomeDeg);  // 上下+前后打包一次发出
                     state = STOW_LIFT_FORWARD;
                     ascent_start_time = currentTime;
                 }
@@ -425,16 +424,15 @@ private:
                 break;
             }
 
-            // ---- STOW_ANGLE (收臂步骤2): 角度电机归位, 到位进下一步 ----
+            // ---- STOW_ANGLE (收臂步骤2): 角度电机→0, 到位后进步骤3 (前后伸出) ----
             case STOW_ANGLE: {
                 float aPos = 0.0f;
                 if (arm->readAnglePosition(aPos)) {
                     if (fabsf(aPos - angle_target_degrees) <= kPositionArrivedThreshDeg) {
-                        float vDeg = kFinalDescendRotations * 360.0f;
-                        Serial.printf("Stow step2 done, stow step3: vertical descend→%.1f\n", vDeg);
-                        vertical_target_degrees = vDeg;
-                        arm->setVerticalPosition(vDeg);
-                        state = STOW_DESCEND;
+                        Serial.printf("Stow step2 done, stow step3: forward extend→%.1f\n", kStowForwardExtendDeg);
+                        forward_target_degrees = kStowForwardExtendDeg;
+                        arm->setForwardPosition(kStowForwardExtendDeg);
+                        state = STOW_FORWARD_EXTEND;
                         descent_start_time = currentTime;
                     }
                 }
@@ -445,18 +443,20 @@ private:
                 break;
             }
 
-            // ---- STOW_DESCEND (收臂步骤3): 上下再降到位 → release 放料 → 结束 ----
-            case STOW_DESCEND: {
-                float vPos = 0.0f;
-                if (arm->readVerticalPosition(vPos)) {
-                    if (fabsf(vPos - vertical_target_degrees) <= kPositionArrivedThreshDeg) {
-                        Serial.printf("Stow step3 done (pos=%.1f), releasing\n", vPos);
-                        arm->release();   // 收臂到位, 松爪放下物料
+            // ---- STOW_FORWARD_EXTEND (收臂步骤3): 前后伸出到位 → release 放料 → [物料盘逻辑链] → 结束 ----
+            case STOW_FORWARD_EXTEND: {
+                float fPos = 0.0f;
+                if (arm->readForwardPosition(fPos)) {
+                    if (fabsf(fPos - forward_target_degrees) <= kPositionArrivedThreshDeg) {
+                        Serial.printf("Stow step3 done (pos=%.1f), releasing\n", fPos);
+                        arm->release();   // 前后伸出到位, 松爪放下物料
+                        // [ ! ] 预留: 物料盘逻辑链入口 (放料后物料盘存储)。
+                        //   当前直接 finishRun 结束本轮; 物料盘动作就位后在此衔接 tray->store(color)。
                         finishRun(currentTime);
                     }
                 }
                 if ((currentTime - descent_start_time) > kDescentTimeoutMs) {
-                    Serial.println("ERROR: Stow step3 (descend) timeout! Stopping.");
+                    Serial.println("ERROR: Stow step3 (forward extend) timeout! Stopping.");
                     haltAndReset();
                 }
                 break;
