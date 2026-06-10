@@ -107,7 +107,8 @@ void applyChassisCommand(const InputState& input) {
 ///        边沿检测与流程逻辑封装在 TaskCoordinator / ArmSequence。
 void applyArmCommand(const InputState& input) {
     g_task_coordinator->update(input.buttons.a, input.buttons.x, input.buttons.b,
-                               input.buttons.l1, input.buttons.dpadX, input.buttons.dpadY);
+                               input.buttons.l1, input.buttons.dpadX, input.buttons.dpadY,
+                               input.buttons.y);
 }
 
 }  // namespace

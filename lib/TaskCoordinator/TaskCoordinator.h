@@ -57,7 +57,7 @@ private:
     static constexpr float kReturnVerticalDeg      = 0.0f;     // 回位 step1: 上下→0
     static constexpr float kReturnForwardHomeDeg   = 0.0f;     // 回位 step1: 前后→0 (先收回, 防撞)
     static constexpr float kReturnAngleDeg         = 0.0f;     // 回位 step2: 角度→0
-    static constexpr float kReturnForwardExtendDeg = 430.0f;   // 回位 step3: 前后伸到领料位 (+430, 与夹取收臂 kStowForwardExtendDeg 方向统一)
+    static constexpr float kReturnForwardExtendDeg = 420.0f;   // 回位 step3: 前后伸到领料位 (+430, 与夹取收臂 kStowForwardExtendDeg 方向统一)
 
     // 回位到位判定 (P_RETURN_* 自动轮询, 撞机风险高需按序保证)
     static constexpr float kPositionArrivedThreshDeg = 5.0f;   // 到位阈值 (度)
@@ -66,7 +66,7 @@ private:
     // 手动点动 (d-pad 位置步进)
     static constexpr float kJogStepDeg    = 2.0f;    // 每帧按住步进量 (度, 占位)
     static constexpr float kJogAngleSign  = 0.5f; // 左右→角度 方向因子 (反了取负)
-    static constexpr float kJogForwardSign = 1.0f;   // 上下→前后 方向因子 (反了取负)
+    static constexpr float kJogForwardSign = -1.0f;   // 上下→前后 方向因子 (反了取负)
 
     static constexpr uint32_t kStepLockMs = 200;     // 步进后忽略 X 的最短停留 (防手快误推进)
     static constexpr uint32_t kBusDelayMs = 2;       // 同帧两条命令间的总线间隔
@@ -95,6 +95,9 @@ private:
     // X 键边沿检测 (放置流程自持, 与 ArmSequence 的边沿独立)
     bool prev_x_pressed = false;
 
+    // Y 键边沿检测 (手动物料计数 +1, 全局生效)
+    bool prev_y_pressed = false;
+
 public:
     // 禁用拷贝和赋值
     TaskCoordinator(const TaskCoordinator&) = delete;
@@ -110,19 +113,27 @@ public:
         : arm(arm), arm_seq(armSeq), tray(tray) {}
 
     /**
-     * @brief 每帧主入口 (阶段1 转发 + 阶段2 放置流程 + 物料盘推进)
+     * @brief 每帧主入口 (阶段1 转发 + 阶段2 放置流程 + 物料盘推进 + Y键计数)
      * @param aPressed     A 键: 阶段1 夹取
      * @param xPressed     X 键: 阶段2 放置 (启动 / 逐步确认推进)
      * @param abortPressed B 键: 中止当前运行
      * @param l1Pressed    L1 键: 阶段1 前置预备摆位
      * @param dpadX        方向键左右 (-1/0/1): 手动瞄准角度电机
      * @param dpadY        方向键上下 (-1/0/1): 手动瞄准前后电机
+     * @param yPressed     Y 键: 手动物料数 +1 (全局生效, 任意时刻可按)
      * @note  阶段1 与阶段2 互斥: 放置流程运行期独占 X/B/dpad, 不转发 arm_seq。
+     * @note  Y 键计数全局独立: 不受阶段互斥影响, 任何状态下按一下都 +1。
      */
     void update(bool aPressed, bool xPressed, bool abortPressed,
-                bool l1Pressed, int dpadX, int dpadY) {
+                bool l1Pressed, int dpadX, int dpadY, bool yPressed) {
         const uint32_t now = millis();
         const bool xRising = xPressed && !prev_x_pressed;
+
+        // ---- Y 键手动物料计数 +1 (全局生效, 与阶段互斥无关) ----
+        if (tray != nullptr && yPressed && !prev_y_pressed) {
+            tray->addMaterial();
+        }
+        prev_y_pressed = yPressed;
 
         // ---- 阶段2 运行期: 独占放置流程 (与阶段1 互斥) ----
         if (place_state != P_IDLE) {

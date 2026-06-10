@@ -65,14 +65,14 @@ private:
     //   dispense(): 用 kTightenTable[count-1], 出一个后剩余物料的压紧位 (头块送到出料口)。
     static constexpr float kTightenTable[10] = {
         0.0f,   // 0 个 (空仓 / home)
-        -850.0f,   // 1 个
-        -732.0f,   // 2 个
-        -670.0f,   // 3 个
-        -605.0f,   // 4 个
-        -471.0f,   // 5 个
-        -295.0f,   // 6 个
-        -187.0f,   // 7 个
-        -100.0f,   // 8 个
+        -835.0f,   // 1 个
+        -717.0f,   // 2 个
+        -655.0f,   // 3 个
+        -590.0f,   // 4 个
+        -456.0f,   // 5 个
+        -280.0f,   // 6 个
+        -172.0f,   // 7 个
+        -85.0f,   // 8 个
         -20.0f,   // 9 个 (最多)
     };
 
@@ -286,6 +286,16 @@ public:
     int count() const { return material_count; }
 
     /**
+     * @brief 手动物料数 +1 (由手柄 Y 键触发, 全局任意时刻可调)
+     * @note  入仓不再自动计数, 改由人眼确认按 Y 加, 避免夹空导致计数虚高。
+     *        出料仍自动 -1。不依赖状态机状态, 任何时候都生效。
+     */
+    void addMaterial() {
+        material_count++;
+        Serial.printf("[Tray] addMaterial (Y) -> count=%d\n", material_count);
+    }
+
+    /**
      * @brief 急停: 停同步带电机并复位状态机为 IDLE
      * @note  舵机本质是保持当前角度 (无反馈), 此处不强制复位舵机角度;
      *        如需归位由上层在停止后另行调用 liftDown()/baffleUp()。
@@ -335,12 +345,11 @@ public:
                 }
                 break;
 
-            // ---- 入仓: 同步带推进等够时间 → 计数+1 → 结束 ----
+            // ---- 入仓: 同步带推进等够时间 → 结束 (计数改由 Y 键手动加, 此处不自动+1) ----
             case STORE_PUSH:
                 if (beltMoved(now)) {
-                    material_count++;
                     state = IDLE;
-                    Serial.printf("[Tray] STORE_PUSH done -> IDLE, count=%d\n", material_count);
+                    Serial.printf("[Tray] STORE_PUSH done -> IDLE (count manual via Y, =%d)\n", material_count);
                 }
                 break;
 

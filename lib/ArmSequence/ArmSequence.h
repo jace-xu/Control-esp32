@@ -42,7 +42,7 @@ private:
     static constexpr float kVerticalDirection = -1.0f;  // 上下方向因子: 负=下降, 正=上升
     static constexpr float kRotationDirection = -1.0f;  // 旋转方向因子: 正=逆时针, 负=顺时针
 
-    static constexpr float kDescendTargetRotations = 5.0f*kVerticalDirection;  // 下降到夹取位: 5 圈
+    static constexpr float kDescendTargetDeg = -2700.0f;  // 下降到夹取位: 绝对角度 (度, 负=下降); 直接用度避免圈数换算误差
 
     // 夹取后收臂归位目标 (占位, 现场校准; 圈数带符号同方向因子约定)
     // 步骤1: 上下→0 + 前后→0 同时; 步骤2: 角度→0; 步骤3: 前后伸出到 kStowForwardExtendDeg
@@ -256,7 +256,7 @@ private:
         arm->stopServo();
         delay(2);
         arm->setCountConvergence(false);
-        float targetDeg = kDescendTargetRotations * 360.0f;  // 符号已在常量里
+        float targetDeg = kDescendTargetDeg;  // 直接用绝对角度 (度), 符号已含方向
         vertical_target_degrees = targetDeg;
         arm->setVerticalPosition(targetDeg);
         state = DESCENDING;
