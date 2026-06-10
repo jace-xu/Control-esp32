@@ -65,10 +65,10 @@ class BottomControl{
          */
         void motors_control(const std::array<float, 3>& velocities){
             float rotate_speeds[4];
-            rotate_speeds[0] = +(velocities[0] + velocities[1] - (BOTTOMCONTROL_LX + BOTTOMCONTROL_LY) * velocities[2]) * 30 / BOTTOMCONTROL_PI / BOTTOMCONTROL_WHEEL_RADIUS;
-            rotate_speeds[1] = -(velocities[0] - velocities[1] + (BOTTOMCONTROL_LX + BOTTOMCONTROL_LY) * velocities[2]) * 30 / BOTTOMCONTROL_PI / BOTTOMCONTROL_WHEEL_RADIUS;
-            rotate_speeds[2] = +(velocities[0] - velocities[1] - (BOTTOMCONTROL_LX + BOTTOMCONTROL_LY) * velocities[2]) * 30 / BOTTOMCONTROL_PI / BOTTOMCONTROL_WHEEL_RADIUS;
-            rotate_speeds[3] = -(velocities[0] + velocities[1] + (BOTTOMCONTROL_LX + BOTTOMCONTROL_LY) * velocities[2]) * 30 / BOTTOMCONTROL_PI / BOTTOMCONTROL_WHEEL_RADIUS;
+            rotate_speeds[0] = +(velocities[0] - velocities[1] - (BOTTOMCONTROL_LX + BOTTOMCONTROL_LY) * velocities[2]) * 30 / BOTTOMCONTROL_PI / BOTTOMCONTROL_WHEEL_RADIUS;
+            rotate_speeds[1] = -(velocities[0] + velocities[1] + (BOTTOMCONTROL_LX + BOTTOMCONTROL_LY) * velocities[2]) * 30 / BOTTOMCONTROL_PI / BOTTOMCONTROL_WHEEL_RADIUS;
+            rotate_speeds[2] = +(velocities[0] + velocities[1] - (BOTTOMCONTROL_LX + BOTTOMCONTROL_LY) * velocities[2]) * 30 / BOTTOMCONTROL_PI / BOTTOMCONTROL_WHEEL_RADIUS;
+            rotate_speeds[3] = -(velocities[0] - velocities[1] + (BOTTOMCONTROL_LX + BOTTOMCONTROL_LY) * velocities[2]) * 30 / BOTTOMCONTROL_PI / BOTTOMCONTROL_WHEEL_RADIUS;
             this->control_serial->thread_lock();
             this->control_serial->clear_long_command();
             this->control_serial->Emm_generate_set_rotate_speed_command(1, rotate_speeds[0]);

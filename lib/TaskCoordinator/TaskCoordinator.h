@@ -65,7 +65,7 @@ private:
 
     // 手动点动 (d-pad 位置步进)
     static constexpr float kJogStepDeg    = 2.0f;    // 每帧按住步进量 (度, 占位)
-    static constexpr float kJogAngleSign  = 0.5f; // 左右→角度 方向因子 (反了取负)
+    static constexpr float kJogAngleSign  = -0.2f; // 左右→角度 方向因子 (反了取负)
     static constexpr float kJogForwardSign = -1.0f;   // 上下→前后 方向因子 (反了取负)
 
     static constexpr uint32_t kStepLockMs = 200;     // 步进后忽略 X 的最短停留 (防手快误推进)
