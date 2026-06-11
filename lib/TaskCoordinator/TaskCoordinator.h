@@ -143,9 +143,9 @@ public:
                 runPlacement(now, xRising, dpadX, dpadY);
             }
         } else {
-            // ---- 阶段1 转发 (X 不传给阶段1, 放置已移走) ----
+            // ---- 阶段1 转发 (X 不传给阶段1, 放置已移走; dpad 传入供 MANUAL_AIM 用) ----
             if (arm_seq != nullptr) {
-                arm_seq->update(aPressed, false, abortPressed, l1Pressed);
+                arm_seq->update(aPressed, false, abortPressed, l1Pressed, dpadX, dpadY);
             }
             delay(kBusDelayMs);
             // 阶段1 入仓握手: 监测 arm_seq 忙闲边沿

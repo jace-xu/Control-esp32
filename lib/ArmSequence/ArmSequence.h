@@ -18,15 +18,17 @@ private:
     // ========================================================================
     // 上下电机状态机 (阶段1: A键夹取, 收臂归位)
     //   IDLE →[A或L1] PRE_CATCH(角度+前后预备摆位,等A) →[A] PRE_ALIGN(PID对准,等A确认)
-    //   →[A] DESCENDING(位置下降到夹取位) → GRIPPING(舵机夹取+settle)
+    //   →[A] MANUAL_AIM(手动d-pad微调,等A) →[A] DESCENDING(位置下降到夹取位)
+    //   → GRIPPING(舵机夹取+settle)
     //   → STOW_LIFT_FORWARD(上下→0 + 前后→0 同时) → STOW_ANGLE(角度→0)
-    //   → STOW_FORWARD_EXTEND(前后→-430伸出) → release放料 → [物料盘逻辑链] → IDLE
+    //   → STOW_FORWARD_EXTEND(前后→430伸出) → release放料 → [物料盘逻辑链] → IDLE
     // 阶段2 (X键放置) 已移到 TaskCoordinator, 本类只编排阶段1。
     // ========================================================================
     enum VerticalState {
         IDLE,               // 空闲: 机械臂未在执行上下动作
         PRE_CATCH,          // [前置] 预备摆位: 按 A/L1 后角度+前后摆到预备位, 等再按 A
         PRE_ALIGN,          // 对准等待: 角度+前后跑PID对准, 等再按 A 确认
+        MANUAL_AIM,         // 手动微调: d-pad 点动角度/前后, 等按 A 确认下降
         DESCENDING,         // 下降中: 位置控制到夹取位
         GRIPPING,           // 底部动作: 舵机夹取 + settle
         STOW_LIFT_FORWARD,  // [收臂] 步骤1: 上下→0 + 前后→0 同时, 轮询两轴到位
@@ -85,6 +87,13 @@ private:
     bool servo_stopped = false;             // 非串流位置控制期是否已停一次伺服
     bool completed_normally = false;        // 本轮是否跑到自然终点 (finishRun); 供入仓握手区分"成功"与"超时/中止"
 
+    // 手动微调 (MANUAL_AIM) 跟踪目标 + 点动参数
+    float aim_angle_target = 0.0f;          // 手动微调角度电机当前目标角
+    float aim_forward_target = 0.0f;        // 手动微调前后电机当前目标角
+    static constexpr float kAimJogStepDeg = 2.0f;     // 每帧按住步进量 (度, 占位, 现场调)
+    static constexpr float kAimJogAngleSign = -0.2f; // 左右→角度方向因子 (实测反了再取负)
+    static constexpr float kAimJogForwardSign = -2.0f;// 上下→前后方向因子 (实测反了再取负)
+
     // 触发边沿检测
     bool prev_a_pressed = false;            // 上一帧 A 键是否按住
     bool prev_l1_pressed = false;           // 上一帧 L1 键是否按住
@@ -111,12 +120,15 @@ public:
 
     /**
      * @brief 每帧调用的主入口 (阶段1 编排)
-     * @param aPressed     A 键: 阶段1 夹取 (对准确认 / 下降夹取)
+     * @param aPressed     A 键: 阶段1 夹取 (对准确认 / 手动确认 / 下降夹取)
      * @param xPressed     X 键: 已忽略 (阶段2 放置移到 TaskCoordinator)
      * @param abortPressed B 键: 中止当前运行, 复位为 IDLE
      * @param l1Pressed    L1 键: 阶段1 前置, 空闲时角度电机预备摆位 (PRE_CATCH)
+     * @param dpadX        方向键左右 (-1/0/1): MANUAL_AIM 手动微调角度电机
+     * @param dpadY        方向键上下 (-1/0/1): MANUAL_AIM 手动微调前后电机
      */
-    void update(bool aPressed, bool xPressed, bool abortPressed, bool l1Pressed) {
+    void update(bool aPressed, bool xPressed, bool abortPressed,
+                bool l1Pressed, int dpadX, int dpadY) {
         (void)xPressed;   // 放置已移走, X 不在本类处理
         const uint32_t currentTime = millis();
         bool aRising = aPressed && !prev_a_pressed;
@@ -146,13 +158,17 @@ public:
             arm->beginAlign(1, kColorNone, currentTime);  // 请求误差1 + resetPID + 收敛清零
             enterPreAlign(currentTime);
         }
-        // PRE_ALIGN 期间按 A (第3次) → 仅当已收敛时确认并下降
+        // PRE_ALIGN 期间按 A (第3次) → 停视觉, 进手动微调 MANUAL_AIM
         else if (state == PRE_ALIGN && aRising) {
             if (arm->isAligned()) {
-                confirmAlignAndDescend(currentTime);
+                enterManualAim(currentTime);
             } else {
                 Serial.println("[Stage 1] Not aligned yet, A-confirm ignored");
             }
+        }
+        // MANUAL_AIM 期间按 A (第4次) → 确认下降夹取
+        else if (state == MANUAL_AIM && aRising) {
+            confirmAlignAndDescend(currentTime);
         }
 
         prev_a_pressed = aPressed;
@@ -160,13 +176,20 @@ public:
 
         // ---- 阶段1 自锁运行 ----
         if (active) {
+            // 手动微调: 每帧按住 d-pad 即位置步进 (单次总线事务)
+            if (state == MANUAL_AIM && (dpadX != 0 || dpadY != 0)) {
+                if (dpadX != 0) aim_angle_target   += dpadX * kAimJogStepDeg * kAimJogAngleSign;
+                if (dpadY != 0) aim_forward_target += dpadY * kAimJogStepDeg * kAimJogForwardSign;
+                arm->setAngleForwardPosition(aim_angle_target, aim_forward_target);
+            }
+
             if (arm->isStreaming()) {
                 arm->retryAlignIfNeeded(currentTime);
                 runVisualServo(currentTime);
                 servo_stopped = false;
             } else if ((state == DESCENDING || state == STOW_LIFT_FORWARD ||
                         state == STOW_ANGLE || state == STOW_FORWARD_EXTEND) && !servo_stopped) {
-                // 非串流位置控制期停一次伺服 (排除 PRE_CATCH/PRE_ALIGN)。
+                // 非串流位置控制期停一次伺服 (排除 PRE_CATCH/PRE_ALIGN/MANUAL_AIM)。
                 arm->stopServo();
                 servo_stopped = true;
             }
@@ -247,25 +270,48 @@ private:
     }
 
     /**
-     * @brief PRE_ALIGN 确认 → 停视觉伺服 + 位置下降到夹取位
+     * @brief PRE_ALIGN 确认 → 停视觉伺服, 进入手动微调 MANUAL_AIM
+     * @param currentTime 当前 millis() 时间戳
+     * @note  停视觉 PID, 读取当前角度+前后位置作为手动微调起始目标;
+     *        之后 d-pad 每帧步进, 再按 A 确认下降。
+     */
+    void enterManualAim(uint32_t currentTime) {
+        Serial.println("[Stage 1] entering MANUAL_AIM: d-pad to fine-tune, A to descend");
+        arm->stopAlignStream();   // 停视觉伺服
+        arm->stopServo();         // 停 PID 速度输出
+        delay(2);                 // 停命令发完后, 留间隔让总线稳定再读位置
+        arm->setCountConvergence(false);
+        // 读当前角度+前后位置作为手动微调起始点 (跟踪下发值)
+        // 如果读失败 (电机未回复), 用 PRE_CATCH 摆位时的已知位置兜底, 防目标变成 0 导致回零
+        float aPos = kPreCatchAngleDeg;    // 兜底: PRE_CATCH 角度摆位目标
+        float fPos = kPreCatchForwardDeg;  // 兜底: PRE_CATCH 前后摆位目标
+        bool aOk = arm->readAnglePosition(aPos);
+        delay(2);   // 两次读位置之间留总线间隔
+        bool fOk = arm->readForwardPosition(fPos);
+        aim_angle_target = aPos;
+        aim_forward_target = fPos;
+        Serial.printf("[Stage 1] MANUAL_AIM start: angle=%.1f(%s) forward=%.1f(%s)\n",
+                      aPos, aOk ? "read" : "fallback", fPos, fOk ? "read" : "fallback");
+        state = MANUAL_AIM;
+        descent_start_time = currentTime;  // 复用作超时基准 (可选)
+    }
+
+    /**
+     * @brief MANUAL_AIM 确认 → 位置下降到夹取位
      * @param currentTime 当前 millis() 时间戳
      */
     void confirmAlignAndDescend(uint32_t currentTime) {
-        Serial.println("[Stage 1] confirm: aligned, descending to grip position");
-        arm->stopAlignStream();   // 下降期间停视觉伺服
-        arm->stopServo();
-        delay(2);
-        arm->setCountConvergence(false);
+        Serial.println("[Stage 1] confirm: descending to grip position");
+        // 视觉已在 enterManualAim 停过; 此处直接发下降命令
         float targetDeg = kDescendTargetDeg;  // 直接用绝对角度 (度), 符号已含方向
         vertical_target_degrees = targetDeg;
         arm->setVerticalPosition(targetDeg);
         state = DESCENDING;
         descent_start_time = currentTime;
-        // [ ! ] 本帧已亲自停过伺服, 标记 servo_stopped 以免 update() 的 active 块紧接着
-        //       又发一条 stopServo(), 那会 0 间隔贴在刚发的下降命令(0xFD)后把它挤掉/错帧
-        //       → 6号电机收不到下降命令而不动, 进而 DESCENDING 永不到位、熬到超时。
+        // [ ! ] 标记 servo_stopped 以免 update() 的 active 块紧接着又发 stopServo()
+        //       把刚发的下降命令(0xFD)挤掉/错帧 → 6号电机不动。
         servo_stopped = true;
-        delay(2);   // 与本帧随后 DESCENDING 首次轮询的 ask_current_position 隔开, 同理防丢命令
+        delay(2);   // 与本帧随后 DESCENDING 首次轮询的 ask_current_position 隔开
     }
 
     /**
