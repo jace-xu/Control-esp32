@@ -185,7 +185,7 @@ void loop() {
             Serial.println("No active controller, chassis and arm stopped");
         }
         g_timeout_reported = false;
-        delay(20);
+        delay(10);
         return;
     }
 
@@ -200,7 +200,7 @@ void loop() {
             Serial.println("Controller data timeout, chassis and arm stopped");
             g_timeout_reported = true;  // 只打印一次, 避免串口刷屏
         }
-        delay(20);
+        delay(10);
         return;
     }
 
@@ -232,5 +232,5 @@ void loop() {
     }
 
     // 主循环延迟 20ms, 控制频率约 50Hz
-    delay(20);
+    delay(10);
 }
