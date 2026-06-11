@@ -63,7 +63,7 @@ private:
 
     // PRE_CATCH 预备摆位参数 (前置, 按 L1 触发)
     static constexpr float kPreCatchAngleDeg = 180.0f*kRotationDirection;       // 角度电机预备摆位目标绝对角
-    static constexpr float kPreCatchForwardDeg = 0.0f;      // 前后电机预备摆位目标绝对角 (占位, 现场校准)
+    static constexpr float kPreCatchForwardDeg = 230.0f;      // 前后电机预备摆位目标绝对角 (占位, 现场校准)
     static constexpr uint32_t kPreCatchTimeoutMs = 30000;   // PRE_CATCH 等待按A的超时 (30秒)
 
     // ========================================================================

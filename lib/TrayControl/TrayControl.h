@@ -35,7 +35,8 @@ private:
     // ---- 顶料舵机 (舵机1, LEDC PWM) ----
     static constexpr int kLiftPin = 22;          // 顶料舵机信号引脚 (GPIO22)
     static constexpr int kLiftChannel = 5;       // LEDC 通道 (避开夹爪的 4)
-    static constexpr float kLiftUpAngle = 35.0f;   // 顶起角度 (度): 托高物料
+    static constexpr float kLiftUpStoreAngle = 60.0f;     // 进料时顶起角度 (度): 承接机械臂放料
+    static constexpr float kLiftUpDispenseAngle = 5.0f; // 出料时顶起角度 (度): 托高物料供机械臂夹取
     static constexpr float kLiftDownAngle = 180.0f;  // 落下角度 (度): 初始位 (上电初始化到此)
 
     // ---- 挡板舵机 (舵机2, LEDC PWM) ----
@@ -88,8 +89,9 @@ private:
         IDLE,                // 空闲
 
         // ---- 入仓 (分两次调用: prepareStore 放料前, store 放料后) ----
-        STORE_RETRACT,       // prepareStore 后: 舵机1 升起 + 挡片退到入口负角, 轮询到位 → 等放料
-        STORE_WAIT_PLACE,    // 挡片已退到位, 舵机1 升起, 停此等机械臂放料 + 等 store()
+        STORE_BELT_TO_ENTRY, // prepareStore 后: 同步带先走到接料位 (kEntryAngleDeg), 轮询到位 → 升舵机1
+        STORE_RETRACT,       // 步进到位后: 舵机1 升起承接, 等 settle → 等放料
+        STORE_WAIT_PLACE,    // 舵机1 已升起, 停此等机械臂放料 + 等 store()
         STORE_LIFT_DOWN,     // store 触发: 舵机1 落下, 等 settle
         STORE_PUSH,          // 同步带挡片推回零点把料送进仓, 轮询到位 → 计数+1 → IDLE
 
@@ -146,10 +148,13 @@ public:
      * @brief 同步带电机走到绝对角度 (位置控制)
      * @param deg 目标绝对角度 (度), 相对上电零点; 正=逆时针(让出出入口方向), 负=顺时针(推料/压紧方向)
      * @note  发一次即可, 电机内部闭环走到位; 到位判定靠 readBeltAngle 轮询。
+     * @note  发完命令后留 kPositionReadDelayMs 间隔: 防与同帧随后的总线操作 (问询/别的命令)
+     *        0 间隔背靠背把刚发的位置命令挤掉/错帧 (同夹取下降 bug 的总线时序问题)。
      */
     void beltRunToAngle(float deg) {
         this->control_serial->X_generate_set_position_command(kBeltAddr, deg, kBeltSpeed);
         this->control_serial->send_command();
+        delay(kPositionReadDelayMs);   // 发后总线间隔, 防背靠背丢命令
     }
 
     /**
@@ -174,10 +179,14 @@ public:
         this->control_serial->generate_stop_command(kBeltAddr);
         this->control_serial->send_command();
         this->control_serial->thread_unlock();
+        delay(kPositionReadDelayMs);   // 发后总线间隔, 防背靠背丢命令
     }
 
-    /// @brief 顶料舵机升起 (托高物料)
-    void liftUp() { setServoAngle(kLiftChannel, kLiftUpAngle); }
+    /// @brief 顶料舵机升起 - 进料用 (承接, 角度较高 40°)
+    void liftUpStore() { setServoAngle(kLiftChannel, kLiftUpStoreAngle); }
+
+    /// @brief 顶料舵机升起 - 出料用 (顶起物块, 角度较低 20°)
+    void liftUpDispense() { setServoAngle(kLiftChannel, kLiftUpDispenseAngle); }
 
     /// @brief 顶料舵机落下 (初始位)
     void liftDown() { setServoAngle(kLiftChannel, kLiftDownAngle); }
@@ -194,17 +203,19 @@ public:
     // ========================================================================
 
     /**
-     * @brief 入仓-放料前: 舵机1 升起承接 + 同步带挡片退到入口位 (负角, 让出出入口)
-     * @note  仅空闲时响应。之后机械臂放料, 再调 store() 把料推进仓。
+     * @brief 入仓-放料前: 同步带挡片先退到入口位 (正角, 让出出入口), 到位后舵机1 再升起承接
+     * @note  仅空闲时响应。新时序: 步进先走, 轮询读位置到接料位 (kEntryAngleDeg) 后才 liftUp,
+     *        避免步进与舵机同时启动 (错开电流峰值 + 时序更明确)。之后机械臂放料, 再调 store()。
      */
     void prepareStore() {
         if (state != IDLE) {
+            Serial.printf("[Tray] prepareStore IGNORED (state=%d, not IDLE)\n", state);
             return;
         }
-        liftUp();
-        belt_target_deg = kEntryAngleDeg;   // 挡片退到负角, 让出入口空间
+        belt_target_deg = kEntryAngleDeg;   // 挡片退到正角, 让出入口空间 (只发步进, 不升舵机)
+        Serial.printf("[Tray] prepareStore: belt -> entry %.1f (lift waits arrival)\n", belt_target_deg);
         beltRunToAngle(belt_target_deg);
-        state = STORE_RETRACT;
+        state = STORE_BELT_TO_ENTRY;
         step_start_time = millis();
     }
 
@@ -321,12 +332,22 @@ public:
             case IDLE:
                 break;
 
-            // ---- 入仓: 挡片退到入口负角, 等够移动时间 → 等机械臂放料 ----
+            // ---- 入仓: 同步带走到接料位, 读位置到位 → 升舵机1 (步进先走, 到位后舵机才升) ----
+            case STORE_BELT_TO_ENTRY:
+                if (beltArrived()) {
+                    liftUpStore();   // 步进确认到位, 进料用较高角度升起承接
+                    state = STORE_RETRACT;
+                    step_start_time = now;
+                    Serial.println("[Tray] belt at entry -> lift up (servo1)");
+                }
+                break;
+
+            // ---- 入仓: 舵机1 升起 settle 后 → 等机械臂放料 ----
             case STORE_RETRACT:
-                if (beltMoved(now)) {
+                if (settled(now)) {
                     state = STORE_WAIT_PLACE;
                     step_start_time = now;
-                    Serial.println("[Tray] STORE_RETRACT done -> WAIT_PLACE");
+                    Serial.println("[Tray] lift up done -> WAIT_PLACE");
                 }
                 break;
 
@@ -385,7 +406,7 @@ public:
             // ---- 出仓: 同步带把头块送到出料口, 等够移动时间 → 停稳后舵机1 升起 ----
             case DISP_BELT_TO_PORT:
                 if (beltMoved(now)) {
-                    liftUp();   // 带子已停稳, 此刻才顶料 (先转带到位再顶料)
+                    liftUpDispense();   // 带子已停稳, 出料用较低角度顶起物块
                     state = DISP_LIFT_UP;
                     step_start_time = now;
                     Serial.println("[Tray] DISP belt at port -> lift up");
