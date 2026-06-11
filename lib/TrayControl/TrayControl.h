@@ -71,8 +71,8 @@ private:
         -665.0f,   // 3 个
         -600.0f,   // 4 个
         -466.0f,   // 5 个
-        -210.0f,   // 6 个
-        -160.0f,   // 7 个
+        -220.0f,   // 6 个
+        -180.0f,   // 7 个
         -85.0f,   // 8 个
         -20.0f,   // 9 个 (最多)
     };
@@ -376,11 +376,12 @@ public:
                 }
                 break;
 
-            // ---- 入仓: 同步带推进等够时间 → 结束 (计数改由 Y 键手动加, 此处不自动+1) ----
+            // ---- 入仓: 同步带推进等够时间 → 计数+1 → 结束 ----
             case STORE_PUSH:
                 if (beltMoved(now)) {
+                    material_count++;
                     state = IDLE;
-                    Serial.printf("[Tray] STORE_PUSH done -> IDLE (count manual via Y, =%d)\n", material_count);
+                    Serial.printf("[Tray] STORE_PUSH done -> IDLE, count=%d\n", material_count);
                 }
                 break;
 

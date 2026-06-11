@@ -53,11 +53,11 @@ private:
     static constexpr float kForwardEndDeg     = 0.0f;     // r轴(前后)前伸到头: 绝对角 (占位)
     static constexpr float kRotate180Deg      = -180.0f;   // 转180°: 角度电机绝对角 (占位)
     static constexpr float kAimDescendDeg     = -5100.0f;   // 瞄准前下降一段: 上下绝对角 (占位)
-    static constexpr float kBottomDeg         = -5400.0f;   //降到底: 上下绝对角 (占位)
+    static constexpr float kBottomDeg         = -5600.0f;   //降到底: 上下绝对角 (占位)
     static constexpr float kReturnVerticalDeg      = 0.0f;     // 回位 step1: 上下→0
     static constexpr float kReturnForwardHomeDeg   = 0.0f;     // 回位 step1: 前后→0 (先收回, 防撞)
     static constexpr float kReturnAngleDeg         = 0.0f;     // 回位 step2: 角度→0
-    static constexpr float kReturnForwardExtendDeg = 420.0f;   // 回位 step3: 前后伸到领料位 (+430, 与夹取收臂 kStowForwardExtendDeg 方向统一)
+    static constexpr float kReturnForwardExtendDeg = 410.0f;   // 回位 step3: 前后伸到领料位 (+430, 与夹取收臂 kStowForwardExtendDeg 方向统一)
 
     // 回位到位判定 (P_RETURN_* 自动轮询, 撞机风险高需按序保证)
     static constexpr float kPositionArrivedThreshDeg = 5.0f;   // 到位阈值 (度)
@@ -65,7 +65,7 @@ private:
 
     // 手动点动 (d-pad 位置步进)
     static constexpr float kJogStepDeg    = 2.0f;    // 每帧按住步进量 (度, 占位)
-    static constexpr float kJogAngleSign  = -0.2f; // 左右→角度 方向因子 (反了取负)
+    static constexpr float kJogAngleSign  = -0.1f; // 左右→角度 方向因子 (反了取负)
     static constexpr float kJogForwardSign = -1.0f;   // 上下→前后 方向因子 (反了取负)
 
     static constexpr uint32_t kStepLockMs = 200;     // 步进后忽略 X 的最短停留 (防手快误推进)
