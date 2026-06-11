@@ -26,15 +26,15 @@ private:
     //   P_IDLE →(X,count>0) P_TO_PORT →(X) P_DISPENSE →(X) P_GRIP →(X) P_FWD_NEXT
     //   →(X) P_ROTATE →(X) P_DESCEND_AIM →(X) P_AIM[手动d-pad] →(X) P_DESCEND_BOTTOM
     //   →(X) P_RELEASE →(X) [回位: P_RET_LIFT →到位 P_RET_ANGLE →到位 P_RET_EXTEND →到位]
-    //   →(count>0) P_DISPENSE / (count==0) P_IDLE
-    // 注: 回位 P_RET_* 是放置流程唯一带自动到位判定的段 (撞机风险高, 须按序到位; 同阶段1 STOW)。
+    //   →(count>0) P_AUTO_PICKUP / (count==0) P_IDLE
+    // 注: P_AUTO_PICKUP 按一次X自动跑完"顶料→夹紧→前伸" (计时推进, 不再分三次X)。
+    //     回位 P_RET_* 是放置流程唯一带自动到位判定的段 (撞机风险高, 须按序到位; 同阶段1 STOW)。
     // ========================================================================
     enum PlaceState {
         P_IDLE,            // 空闲
         P_TO_PORT,         // 开爪 + 转到出料口 (首次进入额外 compact 压紧)
-        P_DISPENSE,        // 物料盘顶料舵机顶起一个物块
-        P_GRIP,            // 夹爪合上, 领取物块
-        P_FWD_NEXT,        // r轴(前后)前伸到头 + 物料盘 notifyPicked (落下/送下一块/count-1)
+        P_AUTO_PICKUP,     // 自动取料: dispense→等顶起→grip→等夹紧→前伸+notifyPicked (计时自动推进)
+        P_FWD_NEXT,        // r轴(前后)已前伸到头, 等X转180°
         P_ROTATE,          // 角度转180° (先转完, 不动上下)
         P_DESCEND_AIM,     // 上下下降一段 (转完后再降, 进手动瞄准前置)
         P_AIM,             // 手动模式: d-pad 点动瞄准靶子; 按 X 推进
@@ -53,7 +53,7 @@ private:
     static constexpr float kForwardEndDeg     = 0.0f;     // r轴(前后)前伸到头: 绝对角 (占位)
     static constexpr float kRotate180Deg      = -180.0f;   // 转180°: 角度电机绝对角 (占位)
     static constexpr float kAimDescendDeg     = -5100.0f;   // 瞄准前下降一段: 上下绝对角 (占位)
-    static constexpr float kBottomDeg         = -5300.0f;   //降到底: 上下绝对角 (占位)
+    static constexpr float kBottomDeg         = -5400.0f;   //降到底: 上下绝对角 (占位)
     static constexpr float kReturnVerticalDeg      = 0.0f;     // 回位 step1: 上下→0
     static constexpr float kReturnForwardHomeDeg   = 0.0f;     // 回位 step1: 前后→0 (先收回, 防撞)
     static constexpr float kReturnAngleDeg         = 0.0f;     // 回位 step2: 角度→0
@@ -84,6 +84,14 @@ private:
     PlaceState place_state = P_IDLE;  // 放置流程当前状态
     bool compacted = false;           // 本轮放置是否已压紧 (compact 只首次做一次)
     uint32_t step_time = 0;           // 上次步进时间戳 (kStepLockMs 基准)
+
+    // P_AUTO_PICKUP 自动取料子步骤 (按时间推进: 顶料→夹紧→前伸)
+    int pickup_sub = 0;               // 0=已dispense等顶起, 1=已grip等夹紧, 2=已前伸完成
+    uint32_t pickup_start_time = 0;   // 当前子步骤开始时间戳
+
+    // 自动取料等待参数
+    static constexpr uint32_t kPickupLiftWaitMs = 2500;  // 等带子到位+舵机顶起 (kBeltMoveMs + servo settle, 占位可调)
+    static constexpr uint32_t kPickupGripWaitMs = 800;   // 等夹爪合紧 (同 kGripSettleMs)
 
     // 手动点动目标 (跟踪下发值, 不读位置)
     float angle_target = 0.0f;        // 角度电机当前目标角
@@ -295,6 +303,12 @@ private:
             return;
         }
 
+        // 自动取料段: 按时间自动推进 (顶料→夹紧→前伸, 不等 X)
+        if (place_state == P_AUTO_PICKUP) {
+            runAutoPickup(now);
+            return;
+        }
+
         if (!xRising) {
             return;
         }
@@ -303,6 +317,38 @@ private:
             return;
         }
         advancePlacement(now);
+    }
+
+    /**
+     * @brief 自动取料推进 (P_AUTO_PICKUP): dispense 已调, 按时间自动 grip → 前伸
+     * @param now 当前 millis()
+     * @note  sub=0: 等带子+舵机顶起 (kPickupLiftWaitMs) → grip
+     *        sub=1: 等夹爪合紧 (kPickupGripWaitMs) → 前伸 + notifyPicked → P_FWD_NEXT
+     */
+    void runAutoPickup(uint32_t now) {
+        switch (pickup_sub) {
+            case 0:  // 等带子走完 + 舵机顶起 settle
+                if ((now - pickup_start_time) >= kPickupLiftWaitMs) {
+                    arm->grip();   // 夹爪合上
+                    pickup_sub = 1;
+                    pickup_start_time = now;
+                    Serial.println("[Place] auto-pickup: grip");
+                }
+                break;
+            case 1:  // 等夹爪合紧 settle
+                if ((now - pickup_start_time) >= kPickupGripWaitMs) {
+                    arm->setForwardPosition(kForwardEndDeg);
+                    forward_target = kForwardEndDeg;
+                    delay(kBusDelayMs);
+                    if (tray != nullptr) {
+                        tray->notifyPicked();   // 顶料落下 + 带子送下一块 + count-1
+                    }
+                    place_state = P_FWD_NEXT;
+                    step_time = now;
+                    Serial.println("[Place] auto-pickup done -> P_FWD_NEXT");
+                }
+                break;
+        }
     }
 
     /**
@@ -349,10 +395,11 @@ private:
             case P_RET_EXTEND:
                 if (forwardArrived()) {
                     if (tray != nullptr && tray->count() > 0) {
-                        tray->dispense();   // 下一块已在出料口, 直接顶料 (不再 compact)
-                        place_state = P_DISPENSE;
-                        step_time = now;
-                        Serial.printf("[Place] next block, count=%d\n", tray->count());
+                        tray->dispense();   // 下一块, 直接开始自动取料
+                        pickup_sub = 0;
+                        pickup_start_time = millis();
+                        place_state = P_AUTO_PICKUP;
+                        Serial.printf("[Place] next block auto-pickup, count=%d\n", tray->count());
                     } else {
                         place_state = P_IDLE;
                         compacted = false;
@@ -395,32 +442,19 @@ private:
     void advancePlacement(uint32_t now) {
         step_time = now;
         switch (place_state) {
-            // P_TO_PORT 已到出料口 → 顶料出一块
+            // P_TO_PORT 已到出料口 → 启动自动取料 (顶料→夹紧→前伸, 计时推进)
             case P_TO_PORT:
                 if (tray != nullptr) {
-                    tray->dispense();   // 顶料舵机顶起一个物块 (要求 count>0)
+                    tray->dispense();   // 开始出料 (带子走+舵机顶, 内部 kBeltMoveMs 后 liftUp)
                 }
-                place_state = P_DISPENSE;
-                Serial.println("[Place] P_DISPENSE: tray lift one block");
+                pickup_sub = 0;
+                pickup_start_time = now;
+                place_state = P_AUTO_PICKUP;
+                Serial.println("[Place] P_AUTO_PICKUP: auto dispense→grip→forward");
                 break;
 
-            // P_DISPENSE 物块已顶起 → 合爪领取
-            case P_DISPENSE:
-                arm->grip();
-                place_state = P_GRIP;
-                Serial.println("[Place] P_GRIP: close gripper");
-                break;
-
-            // P_GRIP 已夹住 → r轴前伸到头 + 通知物料盘送下一块
-            case P_GRIP:
-                arm->setForwardPosition(kForwardEndDeg);
-                forward_target = kForwardEndDeg;
-                delay(kBusDelayMs);
-                if (tray != nullptr) {
-                    tray->notifyPicked();   // 顶料落下 + 带子送下一块 + count-1
-                }
-                place_state = P_FWD_NEXT;
-                Serial.println("[Place] P_FWD_NEXT: r-axis forward + tray next");
+            // P_AUTO_PICKUP 由 runAutoPickup() 自动推进, 不在此处理 X
+            case P_AUTO_PICKUP:
                 break;
 
             // P_FWD_NEXT → 角度转180° (先转完, 不动上下)
