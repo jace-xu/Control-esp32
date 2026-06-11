@@ -35,7 +35,7 @@ private:
     // ---- 顶料舵机 (舵机1, LEDC PWM) ----
     static constexpr int kLiftPin = 22;          // 顶料舵机信号引脚 (GPIO22)
     static constexpr int kLiftChannel = 5;       // LEDC 通道 (避开夹爪的 4)
-    static constexpr float kLiftUpAngle = 40.0f;   // 顶起角度 (度): 托高物料
+    static constexpr float kLiftUpAngle = 35.0f;   // 顶起角度 (度): 托高物料
     static constexpr float kLiftDownAngle = 180.0f;  // 落下角度 (度): 初始位 (上电初始化到此)
 
     // ---- 挡板舵机 (舵机2, LEDC PWM) ----
