@@ -42,7 +42,7 @@ private:
     // ---- 挡板舵机 (舵机2, LEDC PWM) ----
     static constexpr int kBafflePin = 23;        // 挡板舵机信号引脚 (GPIO23)
     static constexpr int kBaffleChannel = 6;     // LEDC 通道 (避开夹爪的 4 与顶料的 5)
-    static constexpr float kBaffleUpAngle = 85.0f;   // 升起角度 (度): 初始位, 0=下, 90=上
+    static constexpr float kBaffleUpAngle = 82.0f;   // 升起角度 (度): 初始位, 0=下, 90=上
     static constexpr float kBaffleDownAngle = 50.0f;  // 降下角度 (度): 挡住定位
 
     // ---- 舵机 PWM 公共参数 (同 ArmControl 夹爪) ----
