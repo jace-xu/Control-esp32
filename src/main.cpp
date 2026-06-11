@@ -225,6 +225,7 @@ void loop() {
         if (!g_is_stopped &&
             (input.timestampMs - g_last_fresh_input_ms) > kFreshDataGraceMs) {
             stopChassis();
+            delay(2);   // 底盘停命令和随后机械臂读位置之间留总线间隔
         }
         // 机械臂/物料盘状态机照常推进 (input 按键为默认全松开, 不产生误上升沿)
         applyArmCommand(input);

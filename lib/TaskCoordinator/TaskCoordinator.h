@@ -314,8 +314,11 @@ private:
     void runReturn(uint32_t now) {
         switch (place_state) {
             // step1: 上下→0 + 前后→0 都到位 → 转角度→0
-            case P_RET_LIFT:
-                if (verticalArrived() && forwardArrived()) {
+            case P_RET_LIFT: {
+                bool vOk = verticalArrived();
+                delay(2);   // 两次读位置之间留总线间隔, 防响应尾巴干扰
+                bool fOk = forwardArrived();
+                if (vOk && fOk) {
                     arm->setAnglePosition(kReturnAngleDeg);
                     angle_target = kReturnAngleDeg;
                     place_state = P_RET_ANGLE;
@@ -326,6 +329,7 @@ private:
                     abortPlacement();
                 }
                 break;
+            }
 
             // step2: 角度→0 到位 → 前后伸到 +430 领料位
             case P_RET_ANGLE:
@@ -352,6 +356,9 @@ private:
                     } else {
                         place_state = P_IDLE;
                         compacted = false;
+                        if (tray != nullptr) {
+                            tray->resetBaffle();   // 挡板升回初始位, 为下一轮入仓让出空间
+                        }
                         Serial.println("[Place] all done, tray empty");
                     }
                 } else if ((now - step_time) > kReturnTimeoutMs) {

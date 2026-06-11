@@ -35,15 +35,15 @@ private:
     // ---- 顶料舵机 (舵机1, LEDC PWM) ----
     static constexpr int kLiftPin = 22;          // 顶料舵机信号引脚 (GPIO22)
     static constexpr int kLiftChannel = 5;       // LEDC 通道 (避开夹爪的 4)
-    static constexpr float kLiftUpStoreAngle = 60.0f;     // 进料时顶起角度 (度): 承接机械臂放料
+    static constexpr float kLiftUpStoreAngle = 170.0f;     // 进料时顶起角度 (度): 承接机械臂放料
     static constexpr float kLiftUpDispenseAngle = 5.0f; // 出料时顶起角度 (度): 托高物料供机械臂夹取
     static constexpr float kLiftDownAngle = 180.0f;  // 落下角度 (度): 初始位 (上电初始化到此)
 
     // ---- 挡板舵机 (舵机2, LEDC PWM) ----
     static constexpr int kBafflePin = 23;        // 挡板舵机信号引脚 (GPIO23)
     static constexpr int kBaffleChannel = 6;     // LEDC 通道 (避开夹爪的 4 与顶料的 5)
-    static constexpr float kBaffleUpAngle = 90.0f;   // 升起角度 (度): 初始位, 0=下, 90=上
-    static constexpr float kBaffleDownAngle = 0.0f;  // 降下角度 (度): 挡住定位
+    static constexpr float kBaffleUpAngle = 87.0f;   // 升起角度 (度): 初始位, 0=下, 90=上
+    static constexpr float kBaffleDownAngle = 50.0f;  // 降下角度 (度): 挡住定位
 
     // ---- 舵机 PWM 公共参数 (同 ArmControl 夹爪) ----
     static constexpr int kPwmFreq = 50;          // 舵机标准 50Hz
@@ -78,7 +78,7 @@ private:
     };
 
     static constexpr float kPosArrivedThreshDeg = 5.0f;    // 同步带到位判定阈值 (度, 仅 readBeltAngle 备用)
-    static constexpr uint32_t kBeltMoveMs = 2000;          // 同步带移动固定等待 (ms): 发命令后等够这段即视为到位 (闭环步进自走到, 不读位置)
+    static constexpr uint32_t kBeltMoveMs = 1000;          // 同步带移动固定等待 (ms): 发命令后等够这段即视为到位 (闭环步进自走到, 不读位置)
     static constexpr uint32_t kServoSettleMs = 500;        // 舵机动作 settle 等待 (ms), 待调
     static constexpr uint32_t kPositionReadDelayMs = 2;    // 读位置前等电机回复 (ms)
 
@@ -304,6 +304,16 @@ public:
     void addMaterial() {
         material_count++;
         Serial.printf("[Tray] addMaterial (Y) -> count=%d\n", material_count);
+    }
+
+    /**
+     * @brief 挡板(2号舵机)复位到升起位 (出仓结束后恢复初始态, 让出入口空间)
+     * @note  compact() 降下挡板后保持降下; 放置全部完成(count=0)后须调此方法
+     *        让挡板升回来, 否则下一轮入仓时挡板挡住进料。
+     */
+    void resetBaffle() {
+        baffleUp();
+        Serial.println("[Tray] resetBaffle: baffle up (ready for next store)");
     }
 
     /**

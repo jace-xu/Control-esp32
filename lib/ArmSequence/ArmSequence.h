@@ -407,6 +407,7 @@ private:
                 float vPos = 0.0f, fPos = 0.0f;
                 bool vArrived = arm->readVerticalPosition(vPos) &&
                                 fabsf(vPos - vertical_target_degrees) <= kPositionArrivedThreshDeg;
+                delay(2);   // 两次读位置之间留总线间隔, 防第一个响应尾巴干扰第二个问询
                 bool fArrived = arm->readForwardPosition(fPos) &&
                                 fabsf(fPos - forward_target_degrees) <= kPositionArrivedThreshDeg;
                 if (vArrived && fArrived) {

@@ -28,7 +28,7 @@ private:
     static constexpr int kGripperPwmChannel = 4;  // LEDC 通道 (避开底盘可能占用的 0~3)
     static constexpr int kGripperPwmFreq = 50;    // 舵机标准 50Hz
     static constexpr int kGripperPwmResBits = 16; // PWM 分辨率位数
-    static constexpr float kGripperClosedAngle = 120.0f;   // 夹紧角度 (度)
+    static constexpr float kGripperClosedAngle = 115.0f;   // 夹紧角度 (度)
     static constexpr float kGripperOpenAngle = 160.0f;    // 松开角度 (度)
     // 舵机脉宽范围 (微秒): 多数舵机 0.5ms~2.5ms 对应 0~180 度
     static constexpr float kGripperMinPulseUs = 500.0f;
