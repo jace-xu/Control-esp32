@@ -44,7 +44,7 @@ private:
     static constexpr float kVerticalDirection = -1.0f;  // 上下方向因子: 负=下降, 正=上升
     static constexpr float kRotationDirection = -1.0f;  // 旋转方向因子: 正=逆时针, 负=顺时针
 
-    static constexpr float kDescendTargetDeg = -2700.0f;  // 下降到夹取位: 绝对角度 (度, 负=下降); 直接用度避免圈数换算误差
+    static constexpr float kDescendTargetDeg = -2800.0f;  // 下降到夹取位: 绝对角度 (度, 负=下降); 直接用度避免圈数换算误差
 
     // 夹取后收臂归位目标 (占位, 现场校准; 圈数带符号同方向因子约定)
     // 步骤1: 上下→0 + 前后→0 同时; 步骤2: 角度→0; 步骤3: 前后伸出到 kStowForwardExtendDeg
@@ -59,7 +59,7 @@ private:
 
     // 位置控制参数
     static constexpr float kPreDescendRotations = 0.0f*kVerticalDirection;    // 第一次按A先降0.5圈
-    static constexpr uint32_t kGripSettleMs = 2000;          // 舵机夹取到位等待时间
+    static constexpr uint32_t kGripSettleMs = 800;          // 舵机夹取到位等待时间
     static constexpr float kPositionArrivedThreshDeg = 5.0f;// 位置到位判定阈值 (度)
     static constexpr uint32_t kPreAlignTimeoutMs = 30000;   // PRE_ALIGN 等待第二次按A的超时 (30秒)
 
