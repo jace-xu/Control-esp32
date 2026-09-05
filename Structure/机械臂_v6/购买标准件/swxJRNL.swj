@@ -1,0 +1,110 @@
+' ******************************************************************************
+' swxJRNL.swj - journal recorded on 04/01/26 by 徐至谦
+' *****************************************************************************
+Dim swApp As Object
+
+Dim Part As Object
+Dim boolstatus As Boolean
+Dim longstatus As Long, longwarnings As Long
+
+Sub main()
+
+Set swApp = Application.SldWorks
+
+swApp.ActivateDoc2 "线轨MGN9_标件_220", False, longstatus
+Set Part = swApp.ActiveDoc
+Set Part = swApp.ActiveDoc
+Dim myModelView As Object
+Set myModelView = Part.ActiveView
+myModelView.FrameLeft = 0
+myModelView.FrameTop = 0
+Set myModelView = Part.ActiveView
+myModelView.FrameState = swWindowState_e.swWindowMaximized
+Set myModelView = Part.ActiveView
+myModelView.FrameState = swWindowState_e.swWindowMaximized
+Set myModelView = Part.ActiveView
+myModelView.RotateAboutCenter 0.002696095043947111056, 0.04549892808647296866
+Set myModelView = Part.ActiveView
+myModelView.RotateAboutCenter 0.002696095043947111056, 0.01011087290810510492
+Set myModelView = Part.ActiveView
+myModelView.RotateAboutCenter 0, 0.005055436454052552459
+Set myModelView = Part.ActiveView
+myModelView.RotateAboutCenter 0.002696095043947111056, 0.005055436454052552459
+Set myModelView = Part.ActiveView
+myModelView.RotateAboutCenter 0, 0.005055436454052552459
+Set myModelView = Part.ActiveView
+myModelView.RotateAboutCenter 0.002696095043947111056, 0.01011087290810510492
+Set myModelView = Part.ActiveView
+myModelView.RotateAboutCenter 0.002696095043947111056, 0.005055436454052552459
+Set myModelView = Part.ActiveView
+myModelView.RotateAboutCenter 0, 0.005055436454052552459
+Set myModelView = Part.ActiveView
+myModelView.RotateAboutCenter 0.005392190087894222113, 0.005055436454052552459
+Set myModelView = Part.ActiveView
+myModelView.RotateAboutCenter 0.002696095043947111056, 0.005055436454052552459
+Set myModelView = Part.ActiveView
+myModelView.RotateAboutCenter 0.008088285131841333603, 0.01011087290810510492
+Set myModelView = Part.ActiveView
+myModelView.RotateAboutCenter 0.02156876035157688845, 0.01011087290810510492
+Set myModelView = Part.ActiveView
+myModelView.RotateAboutCenter 0.01078438017578844423, 0.01011087290810510492
+Set myModelView = Part.ActiveView
+myModelView.RotateAboutCenter 0.01348047521973555485, 0.01011087290810510492
+Set myModelView = Part.ActiveView
+myModelView.RotateAboutCenter 0.01078438017578844423, 0.01011087290810510492
+Set myModelView = Part.ActiveView
+myModelView.RotateAboutCenter 0.05931409096683644411, 0.04549892808647296866
+Set myModelView = Part.ActiveView
+myModelView.RotateAboutCenter 0.01348047521973555485, 0.005055436454052552459
+Set myModelView = Part.ActiveView
+myModelView.RotateAboutCenter 0.01348047521973555485, 0.01011087290810510492
+Set myModelView = Part.ActiveView
+myModelView.RotateAboutCenter 0.008088285131841333603, 0
+Set myModelView = Part.ActiveView
+myModelView.RotateAboutCenter 0.01348047521973555485, 0.01011087290810510492
+Set myModelView = Part.ActiveView
+myModelView.RotateAboutCenter 0.008088285131841333603, 0.005055436454052552459
+Set myModelView = Part.ActiveView
+myModelView.RotateAboutCenter 0.005392190087894222113, 0.005055436454052552459
+Set myModelView = Part.ActiveView
+myModelView.RotateAboutCenter 0.008088285131841333603, 0.005055436454052552459
+Set myModelView = Part.ActiveView
+myModelView.RotateAboutCenter 0.005392190087894222113, 0
+Set myModelView = Part.ActiveView
+myModelView.RotateAboutCenter 0.005392190087894222113, 0.005055436454052552459
+Set myModelView = Part.ActiveView
+myModelView.RotateAboutCenter 0.005392190087894222113, 0.005055436454052552459
+Set myModelView = Part.ActiveView
+myModelView.RotateAboutCenter 0.005392190087894222113, 0.005055436454052552459
+Set myModelView = Part.ActiveView
+myModelView.RotateAboutCenter 0.002696095043947111056, 0
+Set myModelView = Part.ActiveView
+myModelView.RotateAboutCenter 0.002696095043947111056, 0
+Set myModelView = Part.ActiveView
+myModelView.RotateAboutCenter 0, 0.005055436454052552459
+Set myModelView = Part.ActiveView
+myModelView.RotateAboutCenter 0.002696095043947111056, 0
+
+' Roll View
+Dim swModelView As Object
+Set swModelView = Part.ActiveView
+swModelView.RollBy 0
+boolstatus = Part.Extension.SelectByID2("凸台-拉伸1", "BODYFEATURE", 0, 0, 0, False, 0, Nothing, 0)
+boolstatus = Part.Extension.SelectByID2("凸台-拉伸1", "BODYFEATURE", 0, 0, 0, False, 0, Nothing, 0)
+Part.ClearSelection2 True
+Part.SelectionManager.EnableContourSelection = False
+boolstatus = Part.Extension.SelectByID2("阵列(线性)1", "BODYFEATURE", 0, 0, 0, False, 0, Nothing, 0)
+boolstatus = Part.Extension.SelectByID2("阵列(线性)1", "BODYFEATURE", 0, 0, 0, False, 0, Nothing, 0)
+Part.ClearSelection2 True
+boolstatus = Part.Extension.SelectByID2("", "EDGE", 0.004500000000000000527, 0.0002000000000000005246, -0.2200000000000000011, True, 0, Nothing, 0)
+Part.ActivateSelectedFeature
+
+' Save
+Dim swErrors As Long
+Dim swWarnings As Long
+boolstatus = Part.Save3(1, swErrors, swWarnings)
+Set myModelView = Part.ActiveView
+myModelView.FrameState = swWindowState_e.swWindowMaximized
+Part.ClearSelection2 True
+swApp.ExitApp
+End Sub
