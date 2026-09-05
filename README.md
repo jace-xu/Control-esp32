@@ -24,6 +24,13 @@ An intelligent logistics robot developed for an engineering innovation course. T
 - `Structure/` - SolidWorks models and mechanical design files
 - `Poster.pdf` - Full project poster
 
+## Robot Photos
+
+<p align="center">
+  <img src="1.jpg" alt="Intelligent logistics robot - front view" width="49%">
+  <img src="2.jpg" alt="Intelligent logistics robot - side view" width="49%">
+</p>
+
 ## Project Poster
 
 ![Project poster](poster-preview.jpg)
