@@ -17,6 +17,14 @@ constexpr uint8_t kAllowedControllerBtAddr[6] = {0x40, 0xE4, 0x04, 0x18, 0x5F, 0
 
 uint32_t g_lastControllerDataMs = 0;
 
+// 上一帧真实输入缓存: Bluepad32 hasData()=false (手柄静止/无新包) 时沿用, 保证按键边沿
+// 检测每帧都拿到真实当前值。否则同一次按住会因数据帧断续被反复识别成多次上升沿
+// (典型症状: Y 按 3 下记成 5 次; A 键边沿丢失)。
+ButtonState g_lastButtons;
+StickState g_lastSticks;
+TriggerState g_lastTriggers;
+bool g_hasCachedInput = false;
+
 float normalizeAxis(int raw) {
     // 对称钳位到 [-511, 511] 并除以 511,使正负向都能达到 ±1.0。
     // (摇杆原始范围约为 [-512, 511],直接除以 512 会导致正向最大仅 0.998、负向 -1.0 的不对称)
@@ -195,26 +203,50 @@ InputState read() {
 
     ControllerPtr activeController = getActiveController();
     if (activeController == nullptr) {
+        // 断开: 清缓存, 防重连后用旧按键值误触发边沿
+        g_lastButtons = ButtonState();
+        g_lastSticks = StickState();
+        g_lastTriggers = TriggerState();
+        g_hasCachedInput = false;
         return state;
     }
 
     state.connected = true;
     state.hasFreshData = activeController->hasData();
 
+    // [ ! ] 超时判定基于"链路是否在线", 不基于"有没有新数据帧"。
+    //   Bluepad32 的 hasData() 在手柄状态不变时返回 false (手柄静止 = 无新包),
+    //   若用它更新时间戳, 则手动瞄准 (P_AIM) 长时间不碰键会被误判断流 → 误触发急停、
+    //   把放置流程打回 IDLE。改为: 只要 getActiveController() 仍返回有效 (isConnected),
+    //   本帧就视为链路在线、刷新时间戳。真正断连时 getActiveController() 返回 nullptr,
+    //   上面已走 connected=false 分支急停, 走不到这里。
+    g_lastControllerDataMs = state.timestampMs;
+
     if (state.hasFreshData) {
-        g_lastControllerDataMs = state.timestampMs;
         fillSticksAndTriggers(activeController, state);
         fillButtons(activeController, state);
         fillChassisCommand(state);
         fillArmCommand(state);
-        printDebug(state);
+        // 缓存本帧真实输入, 供无新数据帧沿用 (保证按键边沿检测每帧都有真实当前值)
+        g_lastButtons = state.buttons;
+        g_lastSticks = state.sticks;
+        g_lastTriggers = state.triggers;
+        g_hasCachedInput = true;
+        // printDebug(state);   // 手柄命令调试刷屏, 平时关闭; 需要时取消注释
         return state;
     }
 
-    if ((state.timestampMs - g_lastControllerDataMs) > kControllerTimeoutMs) {
-        state.timedOut = true;
+    // 无新数据帧 (手柄静止, 非断流): 沿用上一帧缓存的真实按键/摇杆状态。
+    //   关键: 不能返回默认全 0, 否则同一次按住会因 hasData 在 true/false 间跳变而被
+    //   反复判成上升沿 (Y 按 3 下记 5 次的根因)。hasFreshData 仍为 false, 供 main 区分
+    //   底盘是否更新; 链路在线不判超时, 放置流程/手动瞄准可长时间保持不被打断。
+    if (g_hasCachedInput) {
+        state.buttons = g_lastButtons;
+        state.sticks = g_lastSticks;
+        state.triggers = g_lastTriggers;
+        fillChassisCommand(state);
+        fillArmCommand(state);
     }
-
     return state;
 }
 

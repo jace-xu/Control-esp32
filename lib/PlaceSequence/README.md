@@ -1,3 +1,12 @@
+# PlaceSequence — 阶段2 放置序列（已退役，被 TaskCoordinator 取代）
+
+> **[ ! ] 本模块已退役。** 阶段2 放置流程自 v3.2.2 起重写为**纯手动 X 键逐步确认**并移入
+> [TaskCoordinator](../TaskCoordinator/README.md)：删除了视觉对准与颜色队列，瞄准改为手柄 d-pad 位置点动。
+> 本类已不再被任何代码 include/使用，磁盘文件保留仅作历史参考，可后续删除。
+> 下面是退役前（基于视觉+颜色队列的自动流程）的原始说明。
+
+---
+
 # PlaceSequence — 阶段2 放置序列（从物料盘取料 → 折回 → 放置）
 
 > X 键触发，按颜色队列 FIFO 逐个消费。视觉对准复用 [ArmControl](../ArmControl/README.md) 集成的对准接口；

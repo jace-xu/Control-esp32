@@ -96,16 +96,19 @@ void applyChassisCommand(const InputState& input) {
 // 机械臂控制
 // ============================================================================
 
-/// @brief 将 A/X/B 三键状态转发给机械臂任务编排器
+/// @brief 将手柄按键与方向键转发给上层任务协调器
 /// @param input 手柄输入状态
-/// @note  两阶段 + 颜色队列模式:
-///        - A 键(阶段1): 请求误差1, 握手后记录一个物料颜色入队, 跑完整升降序列。每按一次记一个。
-///        - X 键(阶段2): 请求误差2, 按队列 FIFO 逐个颜色自动跑完所有升降序列。
-///        - B 键: 中止当前运行, 复位为 IDLE (队列保留)。
-///        - L1 键(阶段1前置): 空闲时角度电机预备摆位 (PRE_CATCH), 再按 A 进对准。
-///        上升沿触发, 序列自锁运行; A/X/B/L1 的边沿检测与队列逻辑封装在 ArmSequence。
+/// @note  两阶段模式 (放置流程已移到 TaskCoordinator):
+///        - A 键(阶段1): 视觉对准 + 夹取 + 收臂, 并由 TC 编排物料盘入仓 (store, count+1)。
+///        - X 键(阶段2): 纯手动逐步确认的放置流程 (出料), 每按一次推进一步。
+///        - B 键: 中止当前运行。
+///        - L1 键(阶段1前置): 空闲时角度电机预备摆位。
+///        - d-pad 上下左右: 放置流程手动瞄准 (左右→角度电机, 上下→前后电机)。
+///        边沿检测与流程逻辑封装在 TaskCoordinator / ArmSequence。
 void applyArmCommand(const InputState& input) {
-    g_task_coordinator->update(input.buttons.a, input.buttons.x, input.buttons.b, input.buttons.l1);
+    g_task_coordinator->update(input.buttons.a, input.buttons.x, input.buttons.b,
+                               input.buttons.l1, input.buttons.dpadX, input.buttons.dpadY,
+                               input.buttons.y);
 }
 
 }  // namespace
@@ -147,8 +150,8 @@ void setup() {
     // 初始化物料盘控制 (骨架; 与底盘/机械臂共用 Serial2 总线)
     g_tray_control = new TrayControl();
 
-    // 初始化上层协调器 (依赖 ArmSequence 与 TrayControl, 须在二者之后创建)
-    g_task_coordinator = new TaskCoordinator(g_arm_sequence, g_tray_control);
+    // 初始化上层协调器 (依赖 ArmControl / ArmSequence / TrayControl, 须在三者之后创建)
+    g_task_coordinator = new TaskCoordinator(g_arm_control, g_arm_sequence, g_tray_control);
 
     // ---- 初始化 Bluepad32 蓝牙手柄输入层 ----
     GamepadInput::begin();
@@ -182,7 +185,7 @@ void loop() {
             Serial.println("No active controller, chassis and arm stopped");
         }
         g_timeout_reported = false;
-        delay(20);
+        delay(10);
         return;
     }
 
@@ -197,7 +200,7 @@ void loop() {
             Serial.println("Controller data timeout, chassis and arm stopped");
             g_timeout_reported = true;  // 只打印一次, 避免串口刷屏
         }
-        delay(20);
+        delay(10);
         return;
     }
 
@@ -205,21 +208,29 @@ void loop() {
     g_timeout_reported = false;
 
     // ---- 情况 3: 有有效手柄连接且数据未超时 ----
-    // hasFreshData == true:  当前帧有新的手柄数据 → 下发控制指令
-    // hasFreshData == false: 当前帧无新数据但未超时 → 宽限期后清零停止,
-    //                        防止沿用上一帧的速度值继续运动
+    // hasFreshData == true:  当前帧有新的手柄数据 → 下发底盘速度 + 转发机械臂按键
+    // hasFreshData == false: 当前帧无新数据但未超时 (人松手静等, 非断流) →
+    //                        底盘速度清零防误冲, 但机械臂/物料盘状态机仍每帧推进:
+    //                        阶段1 "按一下→静等→再按一下" 的多步交互、物料盘到位轮询、
+    //                        各自的超时判定都依赖每帧 tick, 不能在静等期停掉。
+    //                        机械臂真正的断连安全由上面 timedOut(250ms) 与 !connected 兜底。
     if (input.hasFreshData) {
         g_last_fresh_input_ms = input.timestampMs;
         applyChassisCommand(input);   // 更新底盘速度
         delay(2);  // 底盘指令下发后短暂延迟, 确保 Serial2 总线有时间处理指令, 再下发机械臂指令
-        
+
         applyArmCommand(input);       // 更新机械臂控制 (视觉伺服 + 上下序列)
-    } else if ((!g_is_stopped || g_task_coordinator->isActive()) &&
-               (input.timestampMs - g_last_fresh_input_ms) > kFreshDataGraceMs) {
-        // 超过宽限期仍无新数据: 同时停止底盘和机械臂
-        safetyStopAll();
+    } else {
+        // 无新数据宽限期到 → 仅清底盘速度 (防沿用上帧速度续冲); 不停机械臂
+        if (!g_is_stopped &&
+            (input.timestampMs - g_last_fresh_input_ms) > kFreshDataGraceMs) {
+            stopChassis();
+            delay(2);   // 底盘停命令和随后机械臂读位置之间留总线间隔
+        }
+        // 机械臂/物料盘状态机照常推进 (input 按键为默认全松开, 不产生误上升沿)
+        applyArmCommand(input);
     }
 
     // 主循环延迟 20ms, 控制频率约 50Hz
-    delay(20);
+    delay(10);
 }
