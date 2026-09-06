@@ -34,3 +34,7 @@ An intelligent logistics robot developed for an engineering innovation course. T
 ## Project Poster
 
 ![Project poster](poster-preview.jpg)
+
+## License
+
+This project is licensed under the GNU General Public License v3.0. See `LICENSE` for details.
